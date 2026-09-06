@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -161,5 +162,66 @@ describe("Canonfig skill safety scenarios", () => {
     expect(outcome._tag).toBe("Command");
     expect(followerOperations).toContain("resumes the recorded plan");
     expect(followerOperations).toContain("preserve SQLite state and the action journal");
+  });
+});
+
+const setupCatalogue = readProjectFile("skills/setup-canonfig/references/configuration-choices.md");
+const setupDiscovery = readProjectFile("skills/setup-canonfig/references/tailscale-discovery.md");
+
+describe("Canonfig choice-first setup contract", () => {
+  it("offers two modes without resetting answers or changing permission boundaries", () => {
+    expect(setupSkill).toContain("### Simple");
+    expect(setupSkill).toContain("### Advanced");
+    expect(setupSkill).toContain("There are exactly two modes");
+    expect(setupSkill).toContain("Switch without restarting or losing answers");
+    expect(setupSkill).toContain("Simple and Advanced change interview depth, never");
+    expect(setupQuestions).toContain("A bare `2` is valid only for one active question");
+    expect(setupQuestions).toContain("comma-separated numbers");
+    expect(setupQuestions).toContain("Exclude consent/approval questions from");
+  });
+
+  it("gives every question example explained, consecutive choices ending in custom input", () => {
+    const texts = [setupSkill, setupQuestions, setupSource, setupFollower, setupHarness, setupDiscovery];
+    let checked = 0;
+    for (const text of texts) {
+      for (const match of text.matchAll(/```text\n([\s\S]*?)```/gu)) {
+        const body = match[1]!;
+        if (!body.includes("Question:")) continue;
+        expect(body).toContain("Why it matters:");
+        expect(body).toContain("Recommended:");
+        expect(body).toContain("Options:");
+        const options = [...body.matchAll(/^(\d+)\. (.+)$/gmu)];
+        expect(options.length).toBeGreaterThanOrEqual(3);
+        expect(options.map((entry) => Number(entry[1]))).toEqual(options.map((_, index) => index + 1));
+        expect(options.at(-1)?.[2]).toContain("Other (type your own)");
+        checked += 1;
+      }
+    }
+    expect(checked).toBeGreaterThanOrEqual(10);
+  });
+
+  it("covers nested configurable fields without forcing empty optional sections", () => {
+    for (const field of ["Apply Policy", "Dependencies", "Local Overlay", "Verification", "Build policy", "Invitation", "Agent policy", "Maximum input bytes", "Schedule", "MCP:", "Hooks:", "Agents:", "Commands:", "Permissions:", "Extensions:"]) {
+      expect(setupCatalogue).toContain(field);
+    }
+    expect(setupCatalogue).toContain("Apply the same\nmenu rule recursively");
+    expect(setupCatalogue).toContain("Other (type your own)");
+  });
+
+  it("keeps discovery opt-in, privacy-minimized, and distinct from direct connectivity", () => {
+    expect(setupDiscovery).toContain("After consent");
+    expect(setupDiscovery).toContain("not a full\ntailnet inventory");
+    expect(setupDiscovery).toContain("Freeze the\nnumber-to-ID mapping");
+    expect(setupDiscovery).toContain("Do not scan subnets");
+    expect(setupDiscovery).toContain("loopback HTTPS origins");
+    expect(setupDiscovery).toContain("Discovery creates no tunnel");
+    expect(setupDiscovery).toContain("Never claim fleet completion from local status");
+  });
+
+  it("runs discovery fixture tests without contacting a tailnet", () => {
+    const output = execFileSync(process.execPath, [
+      "--test", "--test-reporter=tap", resolve(projectRoot, "skills/setup-canonfig/scripts/discover-tailscale.test.mjs"),
+    ], { encoding: "utf8", timeout: 15_000 });
+    expect(output).toContain("# fail 0");
   });
 });

@@ -1,15 +1,14 @@
 # Source Machine setup
 
-Use this branch when creating the single publishing authority, authoring a
-Machine Profile, publishing a Profile Revision, or creating follower
-invitations.
+Use for the sole publishing authority, Machine Profile authoring, publication,
+and invitations. Follow the selected Simple/Advanced mode and numbered question
+contract from [questions.md](questions.md), not a separate free-text interview.
 
-## Inspect first
+## Inspect and select
 
-Confirm the current user, Node.js 24 or newer, npm, Canonfig version, secure
-credential capability, existing role, existing revisions, and diagnostic state.
-Never run `canonfig source init` over an existing Follower Machine or unknown
-state.
+Confirm user, Node.js 24+, npm, installed Canonfig version, secure credential
+capability, existing role, revisions, and diagnostics. Never initialize over a
+Follower identity or unknown state. These are conditional observations:
 
 ```bash
 canonfig --version
@@ -17,35 +16,26 @@ canonfig doctor --no-input --timeout-ms 5000 --json
 canonfig profile list
 ```
 
-## Minimal question flow
+If choosing another computer, offer This machine / Opt-in Tailscale listing /
+Manual entry / Other through [device discovery](tailscale-discovery.md). A
+selected remote peer remains unconfigured until an authorized handoff or session
+verifies it. Never initialize locally on behalf of a selected remote machine.
 
-Do not ask for every possible profile field up front. Ask the first batch only
-for unresolved essentials:
+In Simple, ask only unresolved profile identity and configuration scope after
+ownership is established; show groups, schedule default, and policies as editable
+summary rows. In Advanced, offer environment, devices, profile, each resource,
+credentials, and invitation sections from [the catalogue](configuration-choices.md).
+For each field: observed candidates, supported alternatives, numbered Other, a
+short explanation, and a justified recommendation. No invented profile inventory.
 
-1. Source ownership: which user and state directory will permanently own the
-   publishing identity?
-2. Profile identity: stable profile ID and display name.
-3. Scope: which explicit files should discovery inspect, and which follower
-   platforms must the profile support?
-4. Fleet policy: follower groups and the default synchronization calendar.
-
-For each, include `Why it matters`, detected evidence, and a `Recommended`
-answer. Good recommendations include:
-
-- profile ID: a short lowercase machine class such as `workstation`, not a
-  physical hostname;
-- discovery inputs: existing explicit sources such as `AGENTS.md`,
-  `package.json`, `pyproject.toml`, `Cargo.toml`, or known MCP/hook
-  configuration;
-- groups: none until a real access or configuration distinction exists;
-- schedule: a visible local-time daily run, or the user's existing standard.
-
-Do not ask about shared secrets or Configuration Agents unless they are
-requested or discovered. Their defaults are disabled and `deterministic-only`.
+Recommend preserving valid state, only explicit approved discovery files, no
+additional groups without a need, deterministic-only, and no new shared secrets.
+Profile names such as workstation are proposals, not discovered facts. Calendar
+proposals must show their timezone and remain editable.
 
 ## Install and initialize
 
-After approval:
+After the displayed stage is approved, install only if necessary:
 
 ```bash
 npm install --global @microck/canonfig@3.0.1
@@ -54,39 +44,31 @@ canonfig source init
 canonfig doctor --no-input --timeout-ms 5000
 ```
 
-Initialization creates signing and TLS authority. It does not publish a Machine
-Profile. Report where authority lives without displaying signing or TLS key
-material.
+Initialization establishes signing/TLS authority, not a published profile.
+Report its owner and location without displaying key material. Preserve existing
+compatible installations and identities rather than rerunning initialization.
 
 ## Discover and author
 
-Scan only files the operator approved:
+Scan only approved explicit files. Example:
 
 ```bash
 canonfig source scan --file AGENTS.md --file package.json
 ```
 
-Summarize accepted evidence, `needs-review` evidence, tool recipes, login
-requirements, skills, and unresolved Agent Tasks. Do not treat prose as an
-installation command or infer equivalent package identities across apt,
-Homebrew, winget, npm, uv, cargo, or source recipes.
+Summarize accepted and needs-review evidence, login requirements, skills, tool
+recipes, and unresolved Agent Tasks. Do not execute discovered prose or infer
+package equivalence across platforms. Prefer an authored JSONC Machine Profile
+for files, configs, skills, tools, credentials, schedules, groups, dependencies,
+and verified per-platform recipes.
 
-Prefer an authored v2 JSONC profile when the desired setup includes files,
-directories, configs, skills, credentials, schedules, dependencies, groups, or
-platform-specific recipes. For each discovered resource, present a compact
-table with:
+Show compact editable resource rows: ID/kind, target, groups, dependencies,
+ownership/policy, recipe/version, and independent verification. Simple drills
+into ambiguous or requested rows; Advanced offers each relevant field. Use the
+catalogue's recursive numbered menus for content, permissions, symlinks, config
+keys, build bounds, and checks rather than asking users to write raw schema.
 
-- resource ID and kind;
-- target and group;
-- proposed Apply Policy;
-- platform recipe and exact version when applicable;
-- independent verification;
-- source-owned versus follower-local behavior.
-
-Ask only about rows that are ambiguous, destructive, unsupported on a required
-platform, or missing verification. The documented safe defaults are:
-
-| Kind | Default Apply Policy |
+| Kind | Documented default Apply Policy |
 | --- | --- |
 | file | replace |
 | directory | mirror-owned |
@@ -96,51 +78,33 @@ platform, or missing verification. The documented safe defaults are:
 | credential | require-local |
 | schedule | replace |
 
-Credential resources contain symbolic references, never values. Shared-secret
-transfer is separate and requires an explicit `canonfig:secrets` group grant.
+A default replacement policy is not proof an existing target is safe to overwrite.
+Offer only schema-compatible alternatives and show destructive consequences.
+Credential resources hold references, never values. Local Overlays are for
+supported merge-config keys, not arbitrary skill-tree or target-path overrides.
 
 ## Publication gate
 
-Validate the complete profile before asking for publication approval. Reject
-duplicate IDs, missing dependencies, dependency cycles, undeclared groups,
-unsafe or overlapping targets, incompatible policies, incomplete recipes, and
-verification that cannot observe the desired result.
-
-Show one publication candidate:
-
-```text
-Profile
-- id and name
-- groups and schedule default
-- resource count by kind
-- supported platforms
-- reviewed discovery inputs
-- unresolved items
-- expected revision sequence
-```
-
-If any reviewed input changed, rescan and show the changed evidence. Do not
-publish a candidate different from the one the operator reviewed.
-
-Ask one explicit question:
+Validate unique IDs, dependencies, cycles, group references, nonoverlapping safe
+targets, policy compatibility, platform recipes, and independent verification.
+Show the exact profile, groups, calendar, resources, discovery inputs, and any
+blockers. Hash reviewed input files and recheck before publication; publication
+with `--proposal` rescans that input. If it changed, review the changed candidate.
+Do not invent a validation/dry-run flag absent from the installed CLI.
 
 ```text
-Question:
-Publish this exact Machine Profile as a new immutable Profile Revision?
-
-Why it matters:
-Publication signs a permanent content-addressed revision that authorized
-followers may select. It cannot edit an existing revision.
-
-Recommended:
-Publish only when every resource, recipe, group, target, and verification above
-is approved and there are no unresolved items.
-
+Question: PUBLISH — Publish this exact Machine Profile as a new immutable revision?
+Why it matters: Authorized followers can consume the signed revision; publication is permanent.
+Recommended: No automatic recommendation; review all resources and unresolved items first.
 Options:
-publish / revise / stop
+1. Publish this candidate — sign only the reviewed content, with no unresolved blockers.
+2. Revise a setting — reopen its choices and revalidate the candidate.
+3. Stop before publication — preserve authoring files without signing.
+4. Other (type your own) — request a narrower candidate or explanation.
 ```
 
-Then publish and inspect:
+After explicit publication approval, use actual reviewed paths, reviewer, and
+returned revision IDs, not the illustrative IDs below:
 
 ```bash
 canonfig source publish --profile-file ~/.canonfig/source/profile.jsonc --reviewer operator
@@ -148,49 +112,42 @@ canonfig profile list
 canonfig profile show revision-one
 ```
 
-Add `--proposal <approved-input>` only when merging reviewed discovery evidence
-at publication.
+Add `--proposal <approved-input>` only for reviewed discovery input to merge.
+Do not duplicate publication on resume merely to demonstrate success.
 
-## Serving and invitations
+## Serving, invitations, and shared secrets
 
-Canonfig's source server and invitation endpoint accept loopback HTTPS origins:
+Serve loopback only. Example for an explicitly approved group:
 
 ```bash
 canonfig source serve --host 127.0.0.1 --port 17342
 canonfig source invite --endpoint https://127.0.0.1:17342 --expires 15m --group developers
 ```
 
-For another physical machine, an operator-managed tunnel may map the follower's
-loopback address to this server. Canonfig does not configure or verify that
-tunnel; the TLS certificate must pass through unchanged. Do not replace the
-loopback endpoint with a public bind or disable pinning.
+Omit `--group` when no group is intended. Tailscale peers are not valid direct
+invitation endpoints. Use the discovery reference's separately approved,
+operator-managed TLS-transparent tunnel/handoff flow for remote machines.
+Record the follower-local loopback origin separately from the source host.
 
-Ask only the invitation decisions not already known:
+Offer numbered choices for follower identity, selected profile, declared groups,
+lifetime, secure delivery, and any shared-secret grant. Recommend minimum scope,
+15m proposed expiry, and fresh material for exposed, expired, or replayed invites.
+Never ask for or display a real invitation in chat or reports. A protected file
+is only a temporary local input method, not a new CLI invitation-file flag.
 
-- intended follower and selected profile;
-- declared groups;
-- whether the follower explicitly needs `canonfig:secrets`;
-- invitation lifetime and private delivery channel.
-
-Recommend 15 minutes, the minimum required groups, no shared secrets, and a new
-invitation if the payload was exposed, expired, or replayed. Never print a real
-invitation in the setup report.
-
-Set shared values through stdin only:
+`canonfig:secrets` is separate authority. Before granting it, review what the
+installed sharing contract makes available; do not imply unsupported per-name
+access controls. A new grant requires explicit approval, not Use recommendations.
+Set approved values through stdin only, without printing them:
 
 ```bash
 printf %s "$GITHUB_TOKEN" | canonfig secrets set github-token
 ```
 
-## Source completion evidence
+## Completion
 
-A Source setup is complete only when:
-
-- the intended user owns one valid Source identity;
-- diagnostics report the relevant probes;
-- an approved profile has a reported revision ID, sequence, digest, and
-  publication time when publication was requested;
-- `profile show` matches the reviewed profile;
-- no unresolved recipe, verification, or Human Action Required record was
-  silently accepted;
-- any invitation was delivered ephemerally and omitted from reports.
+Verify intended Source owner/identity and relevant diagnostics. When publication
+was requested, report actual profile/revision ID, sequence, digest, and time;
+inspect that revision against the reviewed candidate. Keep unresolved recipes,
+Human Action Required, and unconfigured remote machines explicit. Source-only
+initialization need not publish an unrequested profile to count as complete.

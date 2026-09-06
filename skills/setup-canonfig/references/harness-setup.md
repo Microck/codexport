@@ -1,23 +1,14 @@
 # Project harness setup
 
-Use this branch to project one repository-local `.canonfig` source into native
-configuration for AI development harnesses. This does not initialize a Source
-Machine, enroll a Follower Machine, or publish a Machine Profile.
+Project-local projection is separate from Source/Follower synchronization. Do
+not initialize machine identities, ask fleet questions, or discover Tailscale
+peers for this branch alone.
 
-## Inspect first
+## Inspect and offer choices
 
-Find the repository root and inspect:
-
-- existing `.canonfig/harness.yaml`, `.canonfig/harness.yml`, or
-  `.canonfig/harness.json`;
-- `.canonfig/.harness-state.json`;
-- root instruction files and rules;
-- existing skill directories;
-- MCP, hook, agent, command, and permission configuration;
-- installed target executables;
-- native files that may collide with generated artifacts.
-
-Run read-only commands when Canonfig is available:
+Observe the repository root, the single existing harness YAML/YML/JSON source,
+`.canonfig/.harness-state.json`, instructions, rules, skills, MCP, hooks, agents,
+commands, permissions, installed targets, and native-file collisions:
 
 ```bash
 canonfig harness targets
@@ -25,70 +16,58 @@ canonfig harness doctor --json
 canonfig harness status --json
 ```
 
-Canonfig rejects a repository containing more than one supported harness source
-format. Preserve external edits and existing native keys.
+In Simple, offer unresolved targets, approved instruction/skill inputs, and
+collisions; show other settings in an editable summary. In Advanced, offer each
+relevant section from [the catalogue](configuration-choices.md), then use its
+recursive menus for each selected record's fields. Follow [questions](questions.md)
+for numbered options, explanations, recommendations, multi-select, and Other.
 
-## Minimal question flow
+Do not ask the user to define empty optional sections. An Advanced section menu
+can choose Keep / Disabled / Configure / Other before asking record details.
+Simple must not discard detected or explicitly requested MCP/hook/agent settings.
 
-Ask only what the repository does not already answer:
+Targets come from the installed target listing, not an invented or stale enum.
+Distinguish installed candidates from requested targets; installation alone is not
+intent. Preserve valid format and files, recommend YAML for a new source unless
+JSON is established, and begin with strict translation to surface compromises.
 
-1. Which target harnesses are required?
-2. Which canonical instruction file and skill roots should be used?
-3. Are lossy, shim, or unsupported mappings acceptable?
-4. Which detected collisions, if any, may Canonfig own?
+```text
+Question: FORMAT — Which harness source format should this project use?
+Why it matters: Exactly one YAML/YML/JSON source can be active.
+Detected: <existing format, or omit if none>
+Recommended: Preserve the existing format; otherwise 1, the documented YAML default.
+Options:
+1. YAML — human-editable source using the default scaffold.
+2. Strict JSON — explicit JSON source with the same schema.
+3. Other (type your own) — describe a format requirement to validate.
+```
 
-Recommended answers:
+For an existing source, add Keep current as the first option instead of
+implicitly offering a destructive migration. Custom unsupported formats are
+clarifications, not permission to create competing harness files.
 
-- targets: only those named by the request or whose executable and existing
-  configuration show clear intent; otherwise no automatic recommendation;
-- new format: YAML, Canonfig's default, unless the repository already
-  standardizes on strict JSON;
-- instructions: reuse the existing root `AGENTS.md` when present;
-- skills: reuse existing repository skill roots;
-- translation: begin with `--strict` so compromises are explicit;
-- collisions: preserve existing ownership; never recommend `--force`.
+## Scaffold and populate
 
-Do not ask the user to define empty optional sections. Keep MCP servers, hooks,
-agents, commands, permissions, and target extensions empty unless requested or
-discovered.
-
-Every question includes `Why it matters`, `Detected`, and `Recommended`.
-A user should normally be able to answer with `Use recommendations`.
-
-## Scaffold
-
-For a new source:
+After approval, scaffold only a new source, with selected targets:
 
 ```bash
 canonfig harness init
 ```
 
-Use strict JSON only when selected:
+Or when JSON was chosen:
 
 ```bash
 canonfig harness init --format json
 ```
 
-Scaffolding must not overwrite an existing source without explicit approval.
-The canonical layout may include:
-
-```text
-.canonfig/
-  harness.yaml or harness.json
-  instructions/
-  rules/
-  skills/
-  hooks/
-  agents/
-  commands/
-```
-
-MCP credentials remain symbolic environment references. Never copy token values
-into YAML, JSON, generated native files, plan output, or chat.
+Use approved canonical instructions/rules/skills and only intended optional
+features. Every nested field has numbered choices plus Other: MCP transport,
+command/args/cwd/URL, env/header references, timeouts/tool filters; hooks' events,
+matchers/run/failure behavior; agents' models/tools/writability; commands' source
+files/hints; permissions' patterns/actions; and supported target extensions.
+Never copy secret values into source, generated files, or tool output.
 
 ## Validate and plan
-
-Populate only the requested or detected features, then run:
 
 ```bash
 canonfig harness validate
@@ -96,43 +75,31 @@ canonfig harness plan --strict
 canonfig harness diff
 ```
 
-Show:
-
-- selected targets and their support level per feature;
-- files and managed keys to create, update, or remove;
-- shim, lossy, and unsupported diagnostics;
-- collisions and externally edited generated artifacts;
-- executable hook or plugin shims;
-- symbolic MCP environment references.
-
-Do not bury diagnostics in a large unchanged-file list.
-
-When a collision exists, ask about that exact path or key:
+Keep selected targets and strictness consistent across validate/plan/diff/apply.
+Show support per feature, changed paths/keys, executable shims, ownership, and
+symbolic credential references. Strict mode rejects shim/lossy/unsupported
+mappings. A non-strict choice requires explicit review of each compromise;
+unsupported functionality does not become supported by suppressing a diagnostic.
 
 ```text
-Question:
-May Canonfig take ownership of <path or key>?
-
-Why it matters:
-`--force` may replace an existing native entry or externally edited generated
-artifact. Cleanup will later remove only state Canonfig records as owned.
-
-Detected:
-<current owner and conflict>
-
-Recommended:
-No. Preserve the existing entry unless the operator has reviewed the before and
-after content and intentionally transfers ownership.
-
+Question: COLLISION — May Canonfig take ownership of <specific path or key>?
+Why it matters: Force may replace an existing native entry or an externally edited artifact.
+Detected: <verified conflict and reviewed before/after content>
+Recommended: 1 — preserve the existing entry until an intentional transfer is approved.
 Options:
-preserve / transfer this entry / revise canonical source
+1. Preserve — do not overwrite the existing content.
+2. Transfer this reviewed entry — authorize only this exact ownership change.
+3. Revise canonical source — avoid the conflict and produce another plan.
+4. Other (type your own) — explain the required ownership behavior.
 ```
 
-Approval for one collision does not authorize blanket `--force`.
+Approval for one collision does not authorize blanket `--force`. The flag is
+not a per-file selector: isolate or resolve other collisions before applying it,
+and verify that every affected entry is explicitly approved.
 
-## Apply
+## Apply and verify
 
-After the displayed plan is approved:
+Use the stage approval menu after plan review. For a strict selected plan:
 
 ```bash
 canonfig harness apply --strict
@@ -140,19 +107,17 @@ canonfig harness status
 canonfig harness doctor
 ```
 
-Use `--force` only for specifically approved collisions and show the affected
-paths again immediately before apply. `clean` removes only Canonfig-owned
-artifacts and also requires a plan review.
+Check diagnostics and actual pending entries, not just process exit codes.
+Target doctor output may report missing executables while the command succeeds.
+Configuration generated is not the same as the installed harness loading it;
+report required unavailable targets as unresolved and verify native loading when
+an authorized, supported check exists. Preview cleanup before approving removal
+of Canonfig-owned artifacts.
 
-## Harness completion evidence
+## Completion
 
-Harness setup is complete only when:
-
-- exactly one canonical source format exists;
-- configuration validation passes;
-- enabled targets and support levels are reported;
-- the approved plan has no unresolved collision or external edit;
-- apply succeeds without unapproved force ownership;
-- status reports no pending owned changes;
-- requested target executables are probed;
-- every lossy, shim, or unsupported mapping remains explicit.
+Require one canonical source, valid configuration, explicit targets/support,
+no unapproved collision/force/edit, successful apply, and no pending owned
+changes. Report target-probe results and every translation limitation. Both
+modes use the same evidence; a skipped optional section is not a failed setup,
+but a deferred required feature prevents full completion.

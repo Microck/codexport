@@ -1,13 +1,12 @@
 # Follower Machine setup
 
-Use this branch for enrollment, first synchronization, schedule installation,
-diagnosis, or recovery.
+Use for enrollment, convergence, scheduling, or recovery. Keep the selected mode
+and use [numbered choices](questions.md) for every unresolved field and approval.
 
 ## Inspect first
 
-Detect the current user, platform, Node.js and npm versions, Canonfig version,
-secure credential provider, native user scheduler, existing role, selected
-profile, pinned source identity, last run, drift, and recoverable work.
+Observe the current user, platform, runtime, installed version, secure credential
+provider, native scheduler, role, selected profile, pins, last run, and drift:
 
 ```bash
 canonfig --version
@@ -16,36 +15,36 @@ canonfig status --json
 canonfig schedule status
 ```
 
-Do not reenroll an existing healthy follower or replace pins because a source is
-temporarily unreachable. Preserve `~/.canonfig/state.sqlite`, credentials,
-cache, action journal, Applied Resource Records, and follower-modified skills.
+Preserve SQLite state, credentials, pins, cache, journals, Applied Resource
+Records, and follower-modified skills. An unreachable source does not justify
+reenrollment or pin replacement.
 
-## Minimal question flow
+## Mode-aware choices
 
-A normal new follower needs at most one batch:
+In Simple, fill the established name/profile from evidence and ask only missing
+identity, Source connection, and local invitation-input decisions. Show schedule
+and agent defaults in the editable summary. In Advanced, offer every relevant
+field from [the catalogue](configuration-choices.md), including overlays, agent
+bounds, credential handling, schedule calendar/timezone/executable, and recovery.
+Both modes keep numbered options, explanations, recommendations, and Other.
 
-1. Follower name.
-2. Profile ID.
-3. How the invitation will be supplied locally.
-4. Desired schedule, unless the profile default is accepted.
+Use names/profiles from actual state or explicit Source context. Enrollment tokens
+do not imply a selected profile ID; do not invent a profile from an invitation.
+Selecting groups is a Source authority decision, not a follower self-service menu.
 
-Explain each question and recommend:
+For machine choices, offer optional [Tailscale discovery](tailscale-discovery.md)
+or manual entry. This supplies candidates, not authorization or connectivity.
+Keep offline selections pending. Do not enroll the current machine when the
+operator selected another one; use a separately authorized session or handoff.
 
-- a stable descriptive machine name;
-- the profile named in the user's request or invitation context;
-- an ephemeral environment variable or protected temporary file that is
-  deleted immediately after enrollment;
-- review the first plan before apply;
-- the profile schedule default when available, otherwise a visible local-time
-  daily schedule.
+Do not ask for the invitation payload in chat. Use the INVITE_INPUT menu: local
+terminal variable / protected temporary file / not ready / Other. Read privately
+without echo/history, use it locally, then clear/remove the temporary input.
+Never put literal tokens in an agent tool call or create an unsupported file flag.
 
-Do not ask for the invitation payload in chat. Do not ask about shared secrets;
-group authority is carried by the invitation and can be reported after
-enrollment without displaying values.
+## Install and enroll
 
-## Install
-
-After approval:
+Use an approved user-level install only when needed:
 
 ```bash
 npm install --global @microck/canonfig@3.0.1
@@ -53,76 +52,52 @@ canonfig --version
 canonfig doctor --no-input --timeout-ms 5000
 ```
 
-Use Secret Service on Linux, Keychain on macOS, or Credential Manager on
-Windows. Missing secure noninteractive storage remains Human Action Required;
-do not create a plaintext fallback unless the operator explicitly selected a
-documented local-file credential policy.
+Required secure noninteractive storage uses Secret Service, Keychain, or Credential
+Manager. Do not silently downgrade to a plaintext policy. Missing required storage
+remains Human Action Required.
 
-## Enroll
+The source is an exact loopback HTTPS origin. A Tailscale IP/MagicDNS name is not
+that endpoint; an operator-managed TLS-transparent tunnel is separate. Verify
+source process/tunnel availability and preserve TLS/signing pins.
 
-Require the exact selected profile during enrollment:
+With the locally supplied variable and explicitly selected name/profile:
 
 ```bash
 canonfig follower enroll "$INVITE" --name laptop --profile workstation
 ```
 
-On PowerShell, keep the invitation only in the current process. On every
-platform, clear the variable or remove the protected temporary file immediately
-after the command.
+Clear the variable or remove its protected temporary file immediately afterward,
+on PowerShell as well as POSIX shells. Enrollment must establish independently
+revocable credentials, pinned TLS/signing fingerprints, and an authorized profile
+revision. Refuse invalid/exposed/expired/replayed material and request a fresh
+invitation; never reset trust or suppress verification.
 
-Enrollment must:
+Inspect granted groups without printing the invitation. If `canonfig:secrets` is
+present, explain the automatic transfer on successful apply and obtain explicit
+sharing consent before first apply in either mode. Discovery or mode selection
+does not grant this authority.
 
-- pin the source TLS and signing fingerprints;
-- issue one independently revocable follower credential;
-- confirm that the selected profile has an authorized revision;
-- preserve an interrupted enrollment for safe resumption.
-
-Refuse expired, replayed, exposed, malformed, or fingerprint-mismatched
-material. Request a fresh invitation; never reset trust or suppress
-verification.
-
-## First plan
-
-Run a non-mutating plan:
+## First plan and apply
 
 ```bash
 canonfig profile select workstation
 canonfig sync --plan
 ```
 
-Present only material entries by default:
-
-- selected Profile Revision;
-- creates, updates, and owned removals;
-- package recipes and login requirements;
-- dependency order;
-- Configuration Agent tasks and capabilities;
-- Human Action Required records;
-- conflicts and Follower Drift;
-- verification methods.
-
-Collapse unchanged resources and cache details unless the operator requests the
-full plan.
-
-Ask one approval question:
+Show the actual revision, creates/updates/owned removals, recipes, dependencies,
+login requirements, agent tasks/bounds, conflicts, and independent verification.
+Collapse no-ops by default; keep every blocker visible in both modes.
 
 ```text
-Question:
-Apply this exact synchronization plan?
-
-Why it matters:
-Apply may install tools or change managed targets. Canonfig will verify every
-required resource afterward, but third-party installers may not be reversible.
-
-Recommended:
-Apply only when the displayed revision, mutations, ownership, recipes, and
-verification match the intended machine.
-
+Question: APPLY — Apply this exact synchronization plan?
+Why it matters: Managed targets may change; external installers are not fully reversible.
+Recommended: No automatic recommendation; first review the revision and changed targets.
 Options:
-apply / keep plan only / revise profile
+1. Apply reviewed changes — execute this stage with independent verification.
+2. Keep plan only — make no target changes.
+3. Revise configuration — reopen affected numbered settings before replanning.
+4. Other (type your own) — narrow the stage or ask about its consequences.
 ```
-
-## Apply and verify
 
 After approval:
 
@@ -131,65 +106,57 @@ canonfig sync --apply
 canonfig status --json
 ```
 
-A successful download is not Convergence. Report complete only when independent
-verification establishes `Converged`.
+A downloaded blob is not Convergence. Inspect the actual recorded outcome and
+fresh evidence; exit zero alone is not enough. An approved shared-secret transfer
+must be checked separately and reported using names/references only.
 
-A successful apply may synchronize source-owned shared secrets only when the
-follower was enrolled in `canonfig:secrets`. Report names and opaque references,
-never values.
+## Schedule last, only when selected
 
-## Schedule last
+Offer Keep existing/manual / verified profile default / proposed daily or weekly
+calendar / Other. Timezone and executable path remain editable, separately in
+Advanced. Do not invent local working hours. Manual operation is a valid choice,
+not permission to delete an existing schedule.
 
-Install a schedule only after an interactive apply has converged:
+After first convergence and explicit scheduling selection, use the chosen values
+rather than copying this illustrative calendar:
 
 ```bash
 canonfig schedule set daily@09:00 --timezone Europe/Madrid
 canonfig schedule status
 ```
 
-Schedules invoke:
+Native jobs execute:
 
 ```text
 canonfig sync --apply --no-input
 ```
 
-Linux uses a systemd user timer, macOS a launchd user agent, and Windows a
-per-user Task Scheduler task. Confirm that the same user, executable path,
-secure credential provider, source tunnel when needed, and failure output are
-available during scheduled execution.
+Verify the systemd user timer, launchd user agent, or per-user Task Scheduler
+under the same user, with executable, noninteractive secure storage, source,
+tunnel when needed, and visible failures. A schedule resource in the profile is
+also a scheduling mutation: review it before apply. Disabled/drifted or unavailable
+jobs cannot count as verified automatic operation.
 
-Do not claim schedule completion when the native scheduler is disabled,
-drifted, unavailable, or installed for another account.
+## Resume, recovery, and drift
 
-## Resume and recover
-
-When prior state exists, re-inspect rather than restarting setup:
+Preserve answers/mode; re-observe rather than restarting. Recover only when a
+persisted interrupted run exists and the recovery stage is approved:
 
 ```bash
 canonfig status
 canonfig recover --no-input --json
 ```
 
-Recovery resumes the persisted plan and re-observes incomplete actions. It does
-not accept a new revision, erase drift, or guarantee rollback of third-party
-installers.
+Recovery uses the journal, not a new revision or invented rollback of installers.
+For Human Action Required show resource, reason, and exact non-secret instruction.
+For drift offer numbered Preserve local edit / Review restoring Source content /
+Rework eligible local config ownership / Other. An arbitrary edited skill cannot
+be moved into a Local Overlay, which is limited to supported merge-config keys.
+Replan after resolution; never force ownership to escape an error.
 
-For Human Action Required, present the affected resource, reason, and exact
-non-secret instruction. After the person completes it, rerun diagnostics and
-plan. For Follower Drift, preserve the local edit and require the operator to
-choose whether to keep it, restore source content, or move local ownership into
-a Local Overlay.
+## Completion
 
-## Follower completion evidence
-
-A Follower setup is complete only when:
-
-- the intended follower identity, name, profile, groups, and pinned trust are
-  reported;
-- the selected authorized revision is explicit;
-- the approved plan was applied;
-- final status independently reports `Converged`;
-- shared-secret synchronization, when authorized, reports names only;
-- the requested schedule matches the native user scheduler;
-- no Human Action Required, Follower Drift, interrupted, authentication,
-  transport, or verification failure remains unresolved.
+Report actual identity/name, profile/revision, groups, pins, verified convergence,
+authorized secret outcome, and requested scheduler state. Plan-only work is
+complete only as a plan-only request, never as a configured follower. Report
+selected remote devices separately until they have their own evidence.

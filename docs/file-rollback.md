@@ -19,6 +19,8 @@ to binary rollback.
   digest before replacement, and preserves the captured permission intent.
 - The same atomic-write path handles byte buffers and file sources. Native
   permission handling and managed-directory confinement apply to both.
+  If an adapter isolates a directory by moving it, file sources inside that
+  directory remain readable at their isolated location.
 - Completed actions remove their journal and raw backups. Failed restoration
   retains both. Cleanup must not remove another action's or run's files.
 - Append-local still checks for later local edits and parses text within its

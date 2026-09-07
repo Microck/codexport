@@ -1,9 +1,21 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, type FileHandle } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 
 import type { FileContent } from "./machine-state.types.ts";
+
+/** Moving a managed entry moves any file source beneath it too. */
+export const relocateFileContent = (
+  content: FileContent,
+  visibleRoot: string,
+  heldRoot: string,
+): FileContent => {
+  if (content instanceof Uint8Array || !isAbsolute(content.file)) return content;
+  const path = relative(visibleRoot, content.file);
+  if (path === ".." || path.startsWith(`..${sep}`) || isAbsolute(path)) return content;
+  return { ...content, file: join(heldRoot, path) };
+};
 
 /**
  * Fill an already-open private temporary file. The caller owns flush, native

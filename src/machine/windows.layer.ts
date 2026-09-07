@@ -33,7 +33,7 @@ import {
   type MachineStateError,
 } from "./machine-state.errors.ts";
 import { MachineState } from "./machine-state.service.ts";
-import { writeFileContent } from "./file-content.ts";
+import { relocateFileContent, writeFileContent } from "./file-content.ts";
 import { linuxMachineStateLayer } from "./linux.layer.ts";
 import type {
   CredentialPolicy,
@@ -857,7 +857,9 @@ export const windowsMachineStateLayer = (
                     );
                   }
                   held = await applyGuardedMutation(
-                    input.mutation,
+                    input.mutation.kind === "write"
+                      ? { ...input.mutation, content: relocateFileContent(input.mutation.content, visibleTop, heldTop) }
+                      : input.mutation,
                     guardedTarget,
                     tail.length > 0,
                   );

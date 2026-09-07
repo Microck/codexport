@@ -51,7 +51,7 @@ import {
   ProcessTimeoutError,
 } from "./machine-state.errors.ts";
 import { MachineState } from "./machine-state.service.ts";
-import { writeFileContent } from "./file-content.ts";
+import { relocateFileContent, writeFileContent } from "./file-content.ts";
 import type {
   AtomicWriteInput,
   CredentialStorageCapability,
@@ -549,7 +549,7 @@ const portableSafeRootMutation = async (
         const mode = input.mutation.mode ?? defaultFileMode;
         const temporaryHandle = await open(temporary, "wx", mode);
         try {
-          await writeFileContent(temporaryHandle, input.mutation.content);
+          await writeFileContent(temporaryHandle, relocateFileContent(input.mutation.content, root, heldRoot));
           await syncHandle(temporaryHandle);
           await temporaryHandle.chmod(mode);
         } finally {

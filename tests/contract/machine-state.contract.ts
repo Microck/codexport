@@ -167,6 +167,7 @@ export const machineStateContract = (
       async (managedRoot) => {
         const root = temporaryDirectory();
         const source = pathJoin(root, "backup.bin");
+        await mkdir(dirname(source), { recursive: true });
         const handle = await open(source, "wx");
         try {
           await handle.truncate(17 * 1024 * 1024);
@@ -198,6 +199,16 @@ export const machineStateContract = (
           yield* machine.ensureDirectory({ path });
           expect((yield* Effect.flip(copy()))._tag).toBe("MachineFilesystemError");
           expect((yield* machine.inspectPath(path)).kind).toBe("directory");
+          yield* machine.removeEmptyDirectory({ path });
+          yield* machine.atomicWrite({ path, content: new TextEncoder().encode("inside managed root") });
+          const insideDigest = (yield* machine.digestFile({ path })).value;
+          const content = { file: path.absolute, digest: insideDigest };
+          if (managedRoot) {
+            yield* machine.mutateWithinRoot({ root: directory, path, mutation: { kind: "write", content } });
+          } else {
+            yield* machine.atomicWrite({ path, content });
+          }
+          expect((yield* machine.digestFile({ path })).value).toBe(insideDigest);
         }));
       },
     );

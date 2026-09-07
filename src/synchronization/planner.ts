@@ -30,6 +30,7 @@ import {
   PlannerInvalidResourcePathError,
   PlannerMissingDependencyError,
   PlannerPolicyKindMismatchError,
+  PlannerTextCompositionError,
   PlannerResourceKindMismatchError,
   PlannerVerificationContentMismatchError,
   PlannerVerificationKindMismatchError,
@@ -264,6 +265,13 @@ const validateResourceInputs = (
         resource: resource.id,
         publishedKind: resource.kind,
         desiredKind: desired.kind,
+      });
+    }
+    if (resource.policy === "append-local" && desired.kind === "file"
+      && (desired.symlinkTo !== undefined || desired.executable || ((desired.mode ?? 0) & 0o111) !== 0)) {
+      return new PlannerTextCompositionError({
+        resource: resource.id,
+        reason: "append-local requires a non-executable regular text file",
       });
     }
     const verification = indexed.verification.get(resource.id);

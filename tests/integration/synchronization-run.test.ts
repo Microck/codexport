@@ -70,6 +70,8 @@ import { planSynchronization } from "../../src/synchronization/planner.ts";
 import { RollbackCleanupError } from "../../src/synchronization/synchronization.errors.ts";
 import {
   defaultSynchronizationExecutionLimits,
+  executeSynchronizationAction,
+  executionContexts,
 } from "../../src/synchronization/executor.ts";
 import {
   getConfigPath,
@@ -94,6 +96,7 @@ import type {
   SynchronizationRunInput,
 } from "../../src/synchronization/synchronization.types.ts";
 import type { AgentResolutionOutcome } from "../../src/agent/agent-resolution.types.ts";
+import { composeTextFile, parseTextComposition } from "../../src/domain/text-composition.ts";
 
 const decode = Schema.decodeUnknownSync;
 const temporaryDirectories: Array<string> = [];
@@ -262,6 +265,25 @@ const fileFixture = (
       revision,
       artifacts: [artifact],
     },
+  };
+};
+
+const appendLocalContext = (root: string, previousSource?: string): ResourceExecutionContext => {
+  const fixture = fileFixture(root);
+  const resource = fixture.revision.resources[0];
+  const entry = fixture.revision.desired[0];
+  const action = fixture.input.plan.actions[0];
+  if (resource === undefined || entry === undefined || action?.detail.kind !== "write-file") {
+    throw new Error("file fixture did not produce a write");
+  }
+  return {
+    run: fixture.input.id,
+    resource: { ...resource, policy: "append-local" },
+    desired: entry.desired,
+    verification: entry.verification,
+    action: { ...action, detail: { ...action.detail, previousSourceDigest: previousSource === undefined ? undefined : sha256Hex(previousSource) } },
+    artifacts: new Map([[fixture.artifact.digest, fixture.artifact]]),
+    limits: defaultSynchronizationExecutionLimits,
   };
 };
 
@@ -838,6 +860,183 @@ const realUvInstallerContext = (
 };
 
 describe("synchronization apply run", () => {
+  it.each(["absent", "unmanaged", "managed", "identical"] as const)(
+    "restores a persisted append-local backup for an initially %s file",
+    async (initial) => {
+      const root = temporaryDirectory();
+      const oldSource = "previous Source\n";
+      const context = appendLocalContext(root, initial === "managed" ? oldSource : undefined);
+      const target = context.resource.target;
+      const before = initial === "absent" ? undefined
+        : initial === "managed" ? composeTextFile(oldSource, { kind: "unmanaged", local: "local\r\n" })
+        : new TextEncoder().encode(initial === "identical" ? "canonical content" : "local\r\n");
+      await mkdir(dirname(target), { recursive: true });
+      if (before !== undefined) {
+        await writeFile(target, before);
+        chmodSync(target, 0o640);
+      }
+      const layer = machineLayer(root);
+      const prepared = await Effect.runPromise(prepareResourceAction(context).pipe(Effect.provide(layer)));
+      if (prepared.rollbackReference === undefined) throw new Error("missing text backup");
+      await Effect.runPromise(prepared.execute.pipe(Effect.provide(layer)));
+      expect((await Effect.runPromise(verifyResource(context).pipe(Effect.provide(layer)))).passed).toBe(true);
+      // Use the persisted reference, not the closure, to prove restart behavior.
+      await Effect.runPromise(restoreRollbackReference(context, prepared.rollbackReference).pipe(Effect.provide(layer)));
+      await Effect.runPromise(restoreRollbackReference(context, prepared.rollbackReference).pipe(Effect.provide(layer)));
+      if (before === undefined) {
+        await expect(readFile(target)).rejects.toMatchObject({ code: "ENOENT" });
+      } else {
+        expect(await readFile(target)).toEqual(Buffer.from(before));
+        expect(statSync(target).mode & 0o777).toBe(0o640);
+      }
+    },
+  );
+
+  it("refuses append-local rollback after a new local edit and retains both versions", async () => {
+    const root = temporaryDirectory();
+    const context = appendLocalContext(root);
+    await mkdir(dirname(context.resource.target), { recursive: true });
+    await writeFile(context.resource.target, "original local\r\n");
+    const layer = machineLayer(root);
+    const prepared = await Effect.runPromise(prepareResourceAction(context).pipe(Effect.provide(layer)));
+    if (prepared.rollbackReference === undefined) throw new Error("missing text backup");
+    await Effect.runPromise(prepared.execute.pipe(Effect.provide(layer)));
+    const changed = Buffer.concat([await readFile(context.resource.target), Buffer.from("later edit\n")]);
+    await writeFile(context.resource.target, changed);
+    await expect(Effect.runPromise(restoreRollbackReference(context, prepared.rollbackReference).pipe(Effect.provide(layer))))
+      .rejects.toMatchObject({ _tag: "InvalidExecutionPlanError", message: expect.stringContaining("changed after the action") });
+    expect(await readFile(context.resource.target)).toEqual(changed);
+    expect(await readFile(prepared.rollbackReference, "utf8")).toContain(Buffer.from("original local\r\n").toString("base64"));
+  });
+
+  it("recovers an append-local snapshot whose base64 encoding exceeds the file limit", async () => {
+    const root = temporaryDirectory();
+    const base = appendLocalContext(root, "old");
+    const context = { ...base, limits: { ...base.limits, maximumFileBytes: 256 } };
+    const before = composeTextFile("old", { kind: "unmanaged", local: "x".repeat(130) });
+    await mkdir(dirname(context.resource.target), { recursive: true });
+    await writeFile(context.resource.target, before);
+    const layer = machineLayer(root);
+    const prepared = await Effect.runPromise(prepareResourceAction(context).pipe(Effect.provide(layer)));
+    if (prepared.rollbackReference === undefined) throw new Error("missing text backup");
+    expect((await readFile(prepared.rollbackReference)).byteLength).toBeGreaterThan(256);
+    await Effect.runPromise(prepared.execute.pipe(Effect.provide(layer)));
+    await Effect.runPromise(restoreRollbackReference(context, prepared.rollbackReference).pipe(Effect.provide(layer)));
+    expect(await readFile(context.resource.target)).toEqual(Buffer.from(before));
+  });
+
+  it.each([false, true])("recovers a journaled append-local write without erasing later edits: edited=%s", async (edited) => {
+    const root = temporaryDirectory();
+    const base = fileFixture(root);
+    const context = appendLocalContext(root, "previous Source");
+    const revision = { ...base.revision, resources: [context.resource] };
+    const plan = reencodePlan({ ...base.input.plan, actions: [context.action] });
+    const layer = applicationLayer({ ...base, revision });
+    await mkdir(dirname(context.resource.target), { recursive: true });
+    await writeFile(context.resource.target, composeTextFile("previous Source", { kind: "unmanaged", local: "local\n" }));
+    const reference = await Effect.runPromise(Effect.gen(function*() {
+      const repository = yield* StateRepository;
+      yield* repository.registerFollower({ follower });
+      yield* repository.publishRevision({ revision });
+      yield* repository.startRun({ id: context.run, follower: follower.id, revision: revision.id, plan, startedAt: "2026-09-07T00:00:00Z" });
+      const prepared = yield* prepareResourceAction(context);
+      yield* repository.journalAction({
+        run: context.run, action: context.action.id, state: "running", recordedAt: "2026-09-07T00:00:01Z",
+        attempt: 1, rollbackReference: prepared.rollbackReference,
+      });
+      yield* prepared.execute;
+      return prepared.rollbackReference;
+    }).pipe(Effect.provide(layer)));
+    if (reference === undefined) throw new Error("missing text backup");
+    const written = await readFile(context.resource.target);
+    if (edited) await writeFile(context.resource.target, Buffer.concat([written, Buffer.from("after interruption\n")]));
+    // Reopen SQLite and hydrate the serialized action as a fresh process does.
+    const recovery = Effect.runPromise(Effect.flatMap(Synchronization, (synchronization) => synchronization.recover({
+      follower: follower.id, revision, artifacts: [base.artifact],
+    })).pipe(Effect.provide(applicationLayer({ ...base, revision }))));
+    if (edited) {
+      await expect(recovery).rejects.toMatchObject({ _tag: "RecoveryIntegrityError" });
+      expect(await readFile(context.resource.target, "utf8")).toContain("after interruption\n");
+      await expect(access(reference)).resolves.toBeUndefined();
+    } else {
+      expect(await recovery).toMatchObject({ outcome: "Converged" });
+      expect(await readFile(context.resource.target)).toEqual(written);
+      await expect(access(reference)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+  });
+
+  it("preserves local changes made after planning but rejects a changed Source baseline", async () => {
+    const root = temporaryDirectory();
+    const oldSource = "old Source";
+    const context = appendLocalContext(root, oldSource);
+    const layer = machineLayer(root);
+    await mkdir(dirname(context.resource.target), { recursive: true });
+    await writeFile(context.resource.target, composeTextFile(oldSource, { kind: "unmanaged", local: "late local edit" }));
+    const prepared = await Effect.runPromise(prepareResourceAction(context).pipe(Effect.provide(layer)));
+    await Effect.runPromise(prepared.execute.pipe(Effect.provide(layer)));
+    expect(parseTextComposition(await readFile(context.resource.target))).toEqual({
+      kind: "managed", source: "canonical content", local: "late local edit",
+    });
+    const changed = composeTextFile("unexpected Source", { kind: "unmanaged", local: "keep local" });
+    await writeFile(context.resource.target, changed);
+    await expect(Effect.runPromise(prepareResourceAction(context).pipe(Effect.provide(layer))))
+      .rejects.toMatchObject({ _tag: "InvalidExecutionPlanError", message: expect.stringContaining("Source text changed") });
+    expect(await readFile(context.resource.target)).toEqual(Buffer.from(changed));
+  });
+
+  it("refuses a local edit between append-local preparation and execution", async () => {
+    const root = temporaryDirectory();
+    const context = appendLocalContext(root);
+    const layer = machineLayer(root);
+    const prepared = await Effect.runPromise(prepareResourceAction(context).pipe(Effect.provide(layer)));
+    await mkdir(dirname(context.resource.target), { recursive: true });
+    await writeFile(context.resource.target, "new local content");
+    await expect(Effect.runPromise(prepared.execute.pipe(Effect.provide(layer))))
+      .rejects.toMatchObject({ _tag: "InvalidExecutionPlanError", message: expect.stringContaining("changed while preparing") });
+    expect(await readFile(context.resource.target, "utf8")).toBe("new local content");
+  });
+
+  it("removes only Source text and can restore that removal from its backup", async () => {
+    const root = temporaryDirectory();
+    const base = appendLocalContext(root);
+    const context: ResourceExecutionContext = { ...base, action: {
+      ...base.action, kind: "remove-resource", detail: { kind: "remove-resource", target: base.resource.target, paths: [], keys: [] },
+    } };
+    const before = composeTextFile("canonical content", { kind: "unmanaged", local: "local\r\n" });
+    await mkdir(dirname(context.resource.target), { recursive: true });
+    await writeFile(context.resource.target, before);
+    chmodSync(context.resource.target, 0o640);
+    const layer = machineLayer(root);
+    const prepared = await Effect.runPromise(prepareResourceAction(context).pipe(Effect.provide(layer)));
+    if (prepared.rollbackReference === undefined) throw new Error("missing text backup");
+    await Effect.runPromise(prepared.execute.pipe(Effect.provide(layer)));
+    expect(await readFile(context.resource.target, "utf8")).toBe("local\r\n");
+    await Effect.runPromise(restoreRollbackReference(context, prepared.rollbackReference).pipe(Effect.provide(layer)));
+    expect(await readFile(context.resource.target)).toEqual(Buffer.from(before));
+    expect(statSync(context.resource.target).mode & 0o777).toBe(0o640);
+  });
+
+  it("rejects binary text, oversized compositions, and symlinks before mutation", async () => {
+    const root = temporaryDirectory();
+    const base = appendLocalContext(root);
+    const context = { ...base, limits: { ...base.limits, maximumFileBytes: 128 } };
+    const target = context.resource.target;
+    const layer = machineLayer(root);
+    await mkdir(dirname(target), { recursive: true });
+    for (const bytes of [Buffer.from([0xff]), Buffer.from("\0binary"), Buffer.from("x".repeat(100))]) {
+      await writeFile(target, bytes);
+      await expect(Effect.runPromise(prepareResourceAction(context).pipe(Effect.provide(layer)))).rejects.toMatchObject({ _tag: "InvalidExecutionPlanError" });
+      expect(await readFile(target)).toEqual(bytes);
+    }
+    const outside = join(root, "outside.txt");
+    await writeFile(outside, "outside");
+    rmSync(target);
+    symlinkSync(outside, target);
+    await expect(Effect.runPromise(prepareResourceAction(context).pipe(Effect.provide(layer)))).rejects.toMatchObject({ _tag: "InvalidExecutionPlanError" });
+    expect(readlinkSync(target)).toBe(outside);
+    expect(await readFile(outside, "utf8")).toBe("outside");
+  });
+
   it.each([
     [
       "reviewed private index",
@@ -2859,6 +3058,102 @@ if (process.argv.slice(2).some((value) =>
     await expect(access(dirname(String(reference)))).rejects.toMatchObject({
       code: "ENOENT",
     });
+  });
+
+  it.each(["run", "recover"] as const)("retains only failed rollback snapshots during %s", async (operation) => {
+    for (const textState of ["no-op", "restored", "edited"] as const) {
+      const base = fileFixture(temporaryDirectory());
+      const text = appendLocalContext(base.root);
+      const desired = { ...text.desired, mode: 0o600 };
+      const normal = { ...text.resource, id: decode(ResourceId)("a-normal"), policy: "replace" as const,
+        target: join(base.root, "home", "normal.txt") };
+      const failing = { ...normal, id: decode(ResourceId)("zz-failing"), kind: "config" as const,
+        target: join(base.root, "home", "failing.json") };
+      const configBytes = Buffer.from('{"shared":true}');
+      const configDigest = decode(ContentDigest)(sha256BytesHex(configBytes));
+      const original = textState === "no-op"
+        ? composeTextFile("canonical content", { kind: "unmanaged", local: "local\n" })
+        : Buffer.from("local\n");
+      await mkdir(dirname(base.target), { recursive: true });
+      await writeFile(base.target, original);
+      chmodSync(base.target, 0o600);
+      await writeFile(failing.target, '{"local":true}');
+      // A real child edits the text after the earlier action, then fails its
+      // own verification. No timers or substituted filesystem operations.
+      const command = textState === "edited"
+        ? `require('node:fs').appendFileSync(${JSON.stringify(base.target)}, 'later edit\\n'); process.exit(1)`
+        : "process.exit(1)";
+      const revision: PlanningProfileRevision = {
+        ...base.revision,
+        resources: [normal, text.resource, failing],
+        desired: [
+          { resource: normal.id, desired, verification: text.verification },
+          { resource: text.resource.id, desired, verification: text.verification },
+          { resource: failing.id,
+            desired: { kind: "config", format: "json", digest: configDigest, keys: ["shared"] },
+            verification: { method: "command", command: [process.execPath, "-e", command] } },
+        ],
+      };
+      const plan = Effect.runSync(planSynchronization({
+        revision, follower: follower.id, localOverlay: [], appliedResources: [],
+        observedState: { platform: "linux", availableBlobs: [], resources: [
+          { resource: normal.id, observed: { state: "absent" } },
+          { resource: text.resource.id, observed: textState === "no-op"
+            ? { state: "present", objectKind: "regular", executable: false, mode: 0o600,
+              digest: sha256BytesHex(original), managedSourceDigest: base.artifact.digest }
+            : { state: "absent" } },
+          { resource: failing.id, observed: { state: "absent" } },
+        ] },
+      }));
+      const input = { ...base.input, revision, plan,
+        artifacts: [base.artifact, { digest: configDigest, content: configBytes }] };
+      const fixture = { ...base, revision, input };
+      const layer = applicationLayer(fixture);
+      let outcome: SynchronizationOutcome;
+      if (operation === "run") {
+        outcome = await seedAndRun(fixture);
+      } else {
+        await Effect.runPromise(Effect.gen(function*() {
+          const repository = yield* StateRepository;
+          yield* repository.registerFollower({ follower });
+          yield* repository.publishRevision({ revision });
+          yield* repository.startRun({ id: input.id, follower: follower.id, revision: revision.id,
+            plan, startedAt: "2026-09-07T00:00:00Z" });
+          const states = yield* executionContexts(input, defaultSynchronizationExecutionLimits);
+          // Recovery must handle already-journaled successes, not only pending work.
+          for (const state of states.filter((entry) => entry.action.resource !== failing.id)) {
+            expect((yield* executeSynchronizationAction(input, state)).kind).toBe("verified");
+          }
+        }).pipe(Effect.provide(layer)));
+        outcome = await Effect.runPromise(Effect.flatMap(Synchronization, (synchronization) =>
+          synchronization.recover({ follower: follower.id, revision, artifacts: input.artifacts })
+        ).pipe(Effect.provide(applicationLayer(fixture))));
+      }
+      expect(outcome.outcome).toBe("Failed");
+      expect(await readFile(failing.target, "utf8")).toBe('{"local":true}');
+      await expect(access(normal.target)).rejects.toMatchObject({ code: "ENOENT" });
+      const references = [...new Set(actionRows(base.database).flatMap((row) =>
+        row.rollback_reference === null ? [] : [decode(Schema.String)(row.rollback_reference)]
+      ))];
+      expect(references.length).toBe(textState === "no-op" ? 2 : 3);
+      const textAction = plan.actions.find((action) => action.resource === text.resource.id);
+      if (textAction === undefined) throw new Error("missing text action");
+      for (const reference of references) {
+        if (textState === "edited" && reference.endsWith(`${sha256Hex(textAction.id)}.json`)) {
+          expect(await readFile(reference, "utf8")).toContain(Buffer.from("local\n").toString("base64"));
+        } else {
+          await expect(access(reference)).rejects.toMatchObject({ code: "ENOENT" });
+        }
+      }
+      if (textState === "edited") {
+        expect(parseTextComposition(await readFile(base.target))).toEqual({
+          kind: "managed", source: "canonical content", local: "local\nlater edit\n",
+        });
+      } else {
+        expect(await readFile(base.target)).toEqual(Buffer.from(original));
+        await expect(access(dirname(references[0]!))).rejects.toMatchObject({ code: "ENOENT" });
+      }
+    }
   });
 
   it("preserves the committed terminal outcome when rollback cleanup fails", async () => {

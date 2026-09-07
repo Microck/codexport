@@ -7,6 +7,7 @@ import {
   FollowerId,
   ProfileRevisionId,
   ResourceId,
+  type ActionId,
 } from "../domain/brand.ts";
 import type {
   AppliedResourceRecord,
@@ -450,6 +451,7 @@ export const recoverSynchronizationPlan = (
     const states = yield* executionContexts(input, executionLimits(input));
     const verified = new Set<ResourceId>();
     const removedResources = new Set<ResourceId>();
+    const failedRollbacks: Array<ActionId> = [];
     const human: Array<HumanAction> = [];
     const drift: Array<DriftConflict> = recovery.drift.map((entry) => entry.conflict);
     const completedRollbacks: Array<{
@@ -581,6 +583,7 @@ export const recoverSynchronizationPlan = (
         }
         result = yield* executeSynchronizationAction(input, state, attempt);
       }
+      if (result.rollbackFailed) failedRollbacks.push(state.action.id);
       if (result.kind === "verified" && result.rollback !== undefined) {
         if (result.resource !== undefined && rollbackOwnership === undefined) {
           rollbackOwnership = {
@@ -598,7 +601,7 @@ export const recoverSynchronizationPlan = (
           resource: rollbackOwnership?.resource,
           previousApplied: rollbackOwnership?.previousApplied,
         });
-      } else if (result.kind === "failed" && rollbackOwnership !== undefined) {
+      } else if (result.kind === "failed" && !result.rollbackFailed && rollbackOwnership !== undefined) {
         yield* appendJournal(
           input.id,
           state.action,
@@ -631,6 +634,9 @@ export const recoverSynchronizationPlan = (
         if (result.kind === "failed") {
           for (const completed of completedRollbacks.reverse()) {
             yield* completed.rollback.pipe(
+              Effect.tapError(() => Effect.sync(() => {
+                failedRollbacks.push(completed.action.id);
+              })),
               Effect.andThen(appendJournal(
                 input.id,
                 completed.action,
@@ -708,6 +714,7 @@ export const recoverSynchronizationPlan = (
     }
     return {
       outcome,
+      failedRollbacks,
       appliedResources,
       removedResources: outcome.outcome === "Converged"
         ? [...removedResources].sort()

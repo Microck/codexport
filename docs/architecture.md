@@ -168,10 +168,17 @@ Apply Policies mean:
 - `replace` on a directory: the managed subtree ends up exactly the desired subtree. The whole directory is listed, so entries Canonfig never wrote are removed too. Use `mirror-owned` to keep them.
 - `merge`: update declared keys through a format-specific codec while preserving the Local Overlay. A key Canonfig owned that the profile no longer declares is removed, unless the follower claimed it through its Local Overlay, which is how an operator keeps a key the profile has dropped.
 - `replace-if-unmodified`: replace only when current content equals the Applied Resource Record or already equals desired content. An absent target is reinstalled, because absence is not a local edit; a target that exists but cannot be verified is left alone and reported.
+- `append-local`: compose a regular UTF-8 text file from a marked Source section
+  followed by follower-owned text. On first adoption an existing file that differs
+  from Source is preserved in full as local text; an identical file is not
+  duplicated. Later runs replace only the Source section and preserve the local
+  suffix byte for byte. Edits to the Source section or malformed markers stop the
+  update. Removing the resource removes only its unchanged Source section.
 - `ensure`: reach and verify a declared capability without removing unrelated software.
+- `require-local`: verify a local credential and return Human Action Required when it is absent.
 
-Policy compatibility is kind-specific: files support only `replace` and
-`replace-if-unmodified`; directories support `mirror-owned` and `replace`;
+Policy compatibility is kind-specific: files support `replace`,
+`replace-if-unmodified`, and `append-local`; directories support `mirror-owned` and `replace`;
 configs support `merge` and `replace`; skills support `replace-if-unmodified`
 and `replace`; tools and credentials support only their listed kind-specific
 policies. A file's verification is also shape-specific:
@@ -185,7 +192,30 @@ actual object kind. A symlink, directory, reparse point, or special object at
 a regular-file target is drift; Canonfig never reads through it to decide
 content or permission convergence. The same no-follow contract applies during
 post-apply verification.
-- `require-local`: verify a local credential and return Human Action Required when it is absent.
+
+`append-local` is opt-in and is intended for Markdown instructions such as
+`AGENTS.md`. Its Source text must not contain the reserved
+`<!-- canonfig:source:start -->` or `<!-- canonfig:source:end -->` markers, NUL
+bytes, or invalid Unicode. Symlinks and executable files cannot use this policy.
+The file starts with the opening marker and a newline, the exact Source text,
+a newline and the closing marker, then two newlines and the exact local text.
+The Applied Resource Record and digest verification cover the Source payload,
+not the follower-owned suffix; observation also retains the whole-file digest.
+The persisted write action records the previous Source digest, so execution and
+recovery cannot overwrite an unexpected edit to that section. Rollback captures
+the whole file and its permissions before composition, just as for replacement.
+Restoration requires the exact pre-write or expected post-write state. If local
+text changes after a write, rollback stops without overwriting it and retains the
+action's backup for manual recovery. Terminal cleanup removes the other action
+backups, including those restored successfully; policy presence alone never
+retains a backup. Removing the Source section leaves a
+regular file, including an empty file when no local text remains.
+These state checks do not lock external editors. Avoid saving the file while a
+sync is writing it; an editor can race the final atomic replacement.
+There is no semantic merge or instruction-precedence rule: first adoption may
+retain overlapping or contradictory text, which the operator can edit in the
+local suffix. Daily synchronization never infers local additions from a new
+text diff and never publishes them back to Source.
 
 Resource dependencies form a directed acyclic graph. Canonfig observes independent resources with bounded concurrency and applies actions in dependency order. Mutating actions for one target are serialized.
 

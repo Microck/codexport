@@ -3,7 +3,7 @@ import {
   sign,
 } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -68,6 +68,7 @@ import {
   synchronizeFollower,
 } from "../../src/synchronization/follower-orchestration.ts";
 import { SynchronizationLive } from "../../src/synchronization/synchronization.layer.ts";
+import { parseTextComposition } from "../../src/domain/text-composition.ts";
 
 const decode = Schema.decodeUnknownSync;
 const directories: Array<string> = [];
@@ -110,6 +111,126 @@ const directoryDigest = (
 }))));
 
 describe("production follower orchestration", () => {
+  it("keeps follower text across adoption, local edits, Source replacement, and removal", async () => {
+    const root = mkdtempSync(join(tmpdir(), "canonfig-text-orchestration-"));
+    directories.push(root);
+    const followerRoot = join(root, "follower");
+    const target = join(followerRoot, "home", "AGENTS.md");
+    const followerDatabase = join(root, "follower.sqlite");
+    const sourceLayer = EnrollmentLive.pipe(
+      Layer.provideMerge(stateRepositoryLayer(join(root, "source.sqlite"))),
+      Layer.provideMerge(machineLayer(join(root, "source"))),
+    );
+    const sourceRuntime = ManagedRuntime.make(sourceLayer);
+    runtimes.push(sourceRuntime);
+    const source = await sourceRuntime.runPromise(Effect.flatMap(Enrollment, (enrollment) => enrollment.initializeSource()));
+    const privateKey = await sourceRuntime.runPromise(Effect.gen(function*() {
+      const machine = yield* MachineState;
+      return createPrivateKey(Redacted.value(yield* machine.loadCredential({ reference: source.signingKeyReference })));
+    }));
+    const profileId = decode(ProfileId)("local-instructions");
+    const resourceId = decode(ResourceId)("instructions");
+    let sequence = 0;
+    const publish = async (content?: string) => {
+      sequence += 1;
+      const profile: MachineProfile = {
+        id: profileId, version: 2, name: "Local instructions", groups: [],
+        resources: content === undefined ? [] : [{
+          id: resourceId, kind: "file", policy: "append-local", target, dependsOn: [],
+          spec: { kind: "file", content, executable: false, mode: 0o600 },
+          verify: { method: "digest", digest: sha256Hex(content) },
+        }],
+      };
+      const canonicalBytes = canonicalJson(asJson(profile));
+      const digest = sha256Hex(canonicalBytes);
+      const unsigned = {
+        id: decode(ProfileRevisionId)(`${profileId}:${digest}`), profileId, sequence,
+        canonicalBytes, digest, publishedAt: `2026-09-07T00:00:${String(sequence).padStart(2, "0")}Z`,
+        groups: [], signingKeyId: source.source.keyId,
+        resources: profile.resources.map((resource) => ({
+          id: decode(ResourceId)(resource.id), kind: resource.kind, policy: resource.policy ?? "replace",
+          target, dependsOn: [], blobs: [decode(BlobId)(digestOf(asJson(resource.spec)))],
+        })),
+      };
+      await sourceRuntime.runPromise(Effect.flatMap(StateRepository, (repository) => repository.publishRevision({
+        revision: { ...unsigned, signature: decode(SourceSignature)(`ed25519:${sign(null, Buffer.from(revisionSigningPayload(unsigned)), privateKey).toString("base64url")}`) },
+      })));
+    };
+    await publish("Source one\n");
+    const server = await sourceRuntime.runPromise(startSourceServer().pipe(Effect.provide(sourceLayer)));
+    servers.push(server);
+    const invitation = await sourceRuntime.runPromise(Effect.flatMap(Enrollment, (enrollment) => enrollment.createInvitation({
+      endpoint: server.endpoint, expiresInMilliseconds: 60_000,
+    })));
+    const followerMachine = machineLayer(followerRoot);
+    const enrolled = await Effect.runPromise(enrollFollower({ invitation, followerName: "Text follower" }).pipe(Effect.provide(followerMachine)));
+    const followerRepository = stateRepositoryLayer(followerDatabase);
+    await Effect.runPromise(Effect.flatMap(StateRepository, (repository) => repository.saveFollowerSynchronizationConfiguration({
+      sourceIdentity: enrolled.source,
+      configuration: {
+        schemaVersion: 1, follower: { ...enrolled.follower, credentialReference: enrolled.credentialReference },
+        selectedProfile: profileId,
+        source: { endpoint: server.endpoint, tlsFingerprint: enrolled.tlsFingerprint, signingFingerprint: enrolled.source.publicKeyFingerprint },
+        credentialReference: enrolled.credentialReference,
+        cacheDirectory: join(root, "cache"), stateLocation: followerDatabase,
+        agentPolicy: "deterministic-only", scheduledInvocation: defaultScheduledInvocation, updatedAt: "2026-09-07T00:00:00Z",
+      },
+    })).pipe(Effect.provide(followerRepository)));
+    const application = Layer.mergeAll(followerRepository, followerMachine, AgentResolutionLive,
+      SynchronizationLive.pipe(Layer.provide(Layer.merge(followerRepository, followerMachine))));
+    const sync = (mode: "plan" | "apply" = "apply") => Effect.runPromise(synchronizeFollower(followerDatabase, mode).pipe(Effect.provide(application)));
+    const text = async () => parseTextComposition(await readFile(target));
+    await mkdir(join(followerRoot, "home"), { recursive: true });
+    const local = "Existing rules\r\n\uFEFF東京\n";
+    await writeFile(target, local);
+    expect((await sync("plan")).plan.actions).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "write-file" })]));
+    expect(await readFile(target, "utf8")).toBe(local);
+    expect((await sync()).outcome).toMatchObject({ outcome: "Converged" });
+    expect(await text()).toEqual({ kind: "managed", source: "Source one\n", local });
+    const adopted = await readFile(target, "utf8");
+    const added = "New local rule\r\n";
+    await writeFile(target, adopted + added);
+    const unchanged = await sync();
+    expect(unchanged.outcome).toMatchObject({ outcome: "Converged" });
+    expect((await sync("plan")).plan.actions.every((action) => action.kind === "no-op")).toBe(true);
+    expect(await readFile(target, "utf8")).toBe(adopted + added);
+    const applied = await Effect.runPromise(Effect.flatMap(StateRepository, (repository) => repository.loadAppliedResources(enrolled.follower.id)).pipe(Effect.provide(followerRepository)));
+    expect(applied).toEqual([expect.objectContaining({ policy: "append-local", digest: sha256Hex("Source one\n") })]);
+
+    await writeFile(target, (adopted + added).replace("Source one", "Local Source edit"));
+    expect((await sync()).outcome).toMatchObject({ outcome: "FollowerDrift" });
+    expect(await readFile(target, "utf8")).toContain("Local Source edit");
+    await writeFile(target, (adopted + added).replace("canonfig:source:end", "broken:end"));
+    expect((await sync()).outcome).toMatchObject({ outcome: "HumanActionRequired" });
+    await writeFile(target, adopted + added);
+
+    await publish("Source two\r\n");
+    const updatedPlan = await sync("plan");
+    expect(updatedPlan.plan.actions).toEqual(expect.arrayContaining([expect.objectContaining({
+      detail: expect.objectContaining({ kind: "write-file", previousSourceDigest: sha256Hex("Source one\n") }),
+    })]));
+    expect((await sync()).outcome).toMatchObject({ outcome: "Converged" });
+    expect(await text()).toEqual({ kind: "managed", source: "Source two\r\n", local: local + added });
+    const beforeRemoval = await readFile(target, "utf8");
+    await publish();
+    await writeFile(target, beforeRemoval.replace("Source two", "edited Source"));
+    expect((await sync()).outcome).toMatchObject({ outcome: "FollowerDrift" });
+    expect(await readFile(target, "utf8")).toContain("edited Source");
+    await writeFile(target, beforeRemoval);
+    expect((await sync()).outcome).toMatchObject({ outcome: "Converged" });
+    expect(await readFile(target, "utf8")).toBe(local + added);
+    expect((await sync("plan")).plan.actions).toEqual([]);
+
+    // A fresh adoption of identical text introduces ownership without a copy.
+    await writeFile(target, "Source three");
+    await publish("Source three");
+    expect((await sync()).outcome).toMatchObject({ outcome: "Converged" });
+    expect(await text()).toEqual({ kind: "managed", source: "Source three", local: "" });
+    await unlink(target);
+    expect((await sync()).outcome).toMatchObject({ outcome: "Converged" });
+    expect(await text()).toEqual({ kind: "managed", source: "Source three", local: "" });
+  });
+
   it("separates authorization-filtered views of one source revision", () => {
     const first = authorizationViewIdentity({
       id: "revision-shared",

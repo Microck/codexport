@@ -51,6 +51,7 @@ const makeSynchronization = Effect.gen(function*() {
               } as const,
               appliedResources: [],
               removedResources: [],
+              failedRollbacks: [],
             })
           ),
         );
@@ -63,7 +64,9 @@ const makeSynchronization = Effect.gen(function*() {
           removedResources: result.removedResources,
         });
         if (result.outcome.outcome !== "Interrupted") {
-          yield* cleanupRollbackSnapshots(input.id, input.plan.actions.map((action) => action.id)).pipe(
+          yield* cleanupRollbackSnapshots(
+            input.id, input.plan.actions.map((action) => action.id), result.failedRollbacks,
+          ).pipe(
             Effect.provideService(MachineState, machine),
             Effect.mapError((error) => new RollbackCleanupError({
               run: input.id,
@@ -97,6 +100,7 @@ const makeSynchronization = Effect.gen(function*() {
           yield* cleanupRollbackSnapshots(
             result.outcome.run,
             recovery?.run.plan.actions.map((action) => action.id) ?? [],
+            result.failedRollbacks,
           ).pipe(
             Effect.provideService(MachineState, machine),
             Effect.mapError((error) => new RollbackCleanupError({

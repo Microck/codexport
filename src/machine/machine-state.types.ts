@@ -30,9 +30,15 @@ export interface EnsureDirectoryInput {
   readonly mode?: number | undefined;
 }
 
+/** A file source is copied with bounded memory and verified before replacement. */
+export type FileContent = Uint8Array | {
+  readonly file: string;
+  readonly digest: ContentDigest;
+};
+
 export interface AtomicWriteInput {
   readonly path: MachinePath;
-  readonly content: Uint8Array;
+  readonly content: FileContent;
   readonly mode?: number | undefined;
 }
 
@@ -57,7 +63,7 @@ export interface ValidatePathWithinRootInput {
 export type SafeRootMutation =
   | {
     readonly kind: "write";
-    readonly content: Uint8Array;
+    readonly content: FileContent;
     readonly mode?: number | undefined;
   }
   | { readonly kind: "remove" }

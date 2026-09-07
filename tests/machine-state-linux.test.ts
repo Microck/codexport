@@ -142,14 +142,16 @@ describe("portable safe-root mutation", () => {
     }
   });
 
-  it("creates descendants and atomically replaces a final symlink", async () => {
+  it("copies a root-contained source while atomically replacing a final symlink", async () => {
     const root = mkdtempSync(join(tmpdir(), "canonfig-portable-safe-root-"));
     try {
       const managed = join(root, "managed");
       const target = join(managed, "nested", "settings.json");
       const outside = join(root, "outside.json");
+      const source = join(managed, "source.txt");
       mkdirSync(managed);
       writeFileSync(outside, "outside");
+      writeFileSync(source, "managed");
 
       await Effect.runPromise(
         Effect.gen(function*() {
@@ -157,6 +159,8 @@ describe("portable safe-root mutation", () => {
           const managedPath = yield* machine.normalizePath({ path: managed });
           const targetPath = yield* machine.normalizePath({ path: target });
           const outsidePath = yield* machine.normalizePath({ path: outside });
+          const sourcePath = yield* machine.normalizePath({ path: source });
+          const sourceDigest = (yield* machine.digestFile({ path: sourcePath })).value;
           yield* machine.mutateWithinRoot({
             root: managedPath,
             path: targetPath,
@@ -170,7 +174,7 @@ describe("portable safe-root mutation", () => {
             path: targetPath,
             mutation: {
               kind: "write",
-              content: new TextEncoder().encode("managed"),
+              content: { file: source, digest: sourceDigest },
             },
           });
         }).pipe(Effect.provide(linuxMachineStateLayer({
@@ -181,6 +185,7 @@ describe("portable safe-root mutation", () => {
 
       expect(readFileSync(target, "utf8")).toBe("managed");
       expect(readFileSync(outside, "utf8")).toBe("outside");
+      expect(readFileSync(source, "utf8")).toBe("managed");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

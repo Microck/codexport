@@ -1,7 +1,7 @@
 import { Effect, Schema } from "effect";
 import { dirname, isAbsolute, join, relative, win32 } from "node:path";
 
-import { CredentialReference, type RunId } from "../domain/brand.ts";
+import { ContentDigest, CredentialReference, type RunId } from "../domain/brand.ts";
 import {
   ResourceSpecInputSchema,
   type PublishedResource,
@@ -70,27 +70,7 @@ const isUnboundedNonNpmPackage = (value: string): boolean =>
   || /(?:^|@)(?:npm:|git\+|git:\/\/|github:|gitlab:|bitbucket:|git@|file:|link:|workspace:|https?:\/\/)/iu
     .test(value);
 
-interface LegacyStoredFile {
-  readonly path: string;
-  readonly existed: boolean;
-  readonly content: string;
-}
-
-type StoredFile =
-  | { readonly path: string; readonly state: "absent" }
-  | { readonly path: string; readonly state: "directory"; readonly mode: number }
-  | { readonly path: string; readonly state: "regular"; readonly content: string; readonly mode: number }
-  | { readonly path: string; readonly state: "symlink"; readonly target: string }
-  | LegacyStoredFile;
-
-const storedState = (
-  entry: StoredFile,
-): "absent" | "directory" | "regular" | "symlink" =>
-  "state" in entry
-    ? entry.state
-    : entry.existed
-    ? "regular"
-    : "absent";
+type StoredFile = typeof StoredFileSchema.Type;
 
 const StoredFileSchema = Schema.Union([
   Schema.Struct({
@@ -105,7 +85,7 @@ const StoredFileSchema = Schema.Union([
   Schema.Struct({
     path: Schema.NonEmptyString,
     state: Schema.Literal("regular"),
-    content: Schema.String,
+    digest: ContentDigest,
     mode: Schema.Int,
   }),
   Schema.Struct({
@@ -113,12 +93,11 @@ const StoredFileSchema = Schema.Union([
     state: Schema.Literal("symlink"),
     target: Schema.NonEmptyString,
   }),
-  Schema.Struct({
-    path: Schema.NonEmptyString,
-    existed: Schema.Boolean,
-    content: Schema.String,
-  }),
 ]);
+
+/** Derived locally, never accepted as a path from persisted metadata. */
+const backupFile = (reference: string, target: string): string =>
+  `${reference}.${sha256Hex(target)}.bin`;
 
 interface RollbackMaterial {
   readonly reference: string;
@@ -196,7 +175,6 @@ const readIfPresent = (
 
 const captureStoredFile = (
   path: MachinePath,
-  maximumBytes: number,
 ): Effect.Effect<StoredFile, MachineStateError, MachineState> =>
   Effect.gen(function*() {
     const machine = yield* MachineState;
@@ -218,49 +196,24 @@ const captureStoredFile = (
     if (symlink !== undefined) {
       return { path: path.absolute, state: "symlink", target: symlink };
     }
-    const content = yield* readIfPresent(path, maximumBytes);
-    if (content === undefined) return { path: path.absolute, state: "absent" };
+    const digest = yield* machine.digestFile({ path });
     const permissions = yield* machine.permissions(path);
     return {
       path: path.absolute,
       state: "regular",
-      content: Buffer.from(content).toString("base64"),
+      digest: digest.value,
       mode: permissions.mode,
     };
   });
 
 const restoreStoredFile = (
   entry: StoredFile,
+  reference: string,
   root?: MachinePath | undefined,
 ): Effect.Effect<void, MachineStateError, MachineState> =>
   Effect.gen(function*() {
     const machine = yield* MachineState;
     const path = yield* machine.normalizePath({ path: entry.path });
-    if ("existed" in entry) {
-      if (entry.existed) {
-        const content = Buffer.from(entry.content, "base64");
-        if (root === undefined) {
-          yield* machine.atomicWrite({ path, content });
-        } else {
-          yield* machine.mutateWithinRoot({
-            root,
-            path,
-            mutation: { kind: "write", content },
-          });
-        }
-      } else {
-        if (root === undefined) {
-          yield* machine.removeFile({ path });
-        } else {
-          yield* machine.mutateWithinRoot({
-            root,
-            path,
-            mutation: { kind: "remove" },
-          });
-        }
-      }
-      return;
-    }
     switch (entry.state) {
       case "absent":
         if (root === undefined) {
@@ -307,7 +260,7 @@ const restoreStoredFile = (
         }
         return;
       case "regular": {
-        const content = Buffer.from(entry.content, "base64");
+        const content = { file: backupFile(reference, entry.path), digest: entry.digest };
         if (root === undefined) {
           yield* machine.atomicWrite({ path, content, mode: entry.mode });
         } else {
@@ -483,36 +436,37 @@ type StoredDirectory = Extract<StoredFile, { readonly state: "directory" }>;
  */
 const restoreStoredFiles = (
   stored: ReadonlyArray<StoredFile>,
+  reference: string,
   root?: MachinePath | undefined,
 ): Effect.Effect<void, MachineStateError, MachineState> =>
   Effect.gen(function*() {
     const deepestEntries = deepestPathFirst(stored, (file) => file.path);
     if (root === undefined) {
       for (const entry of deepestEntries) {
-        yield* restoreStoredFile(entry);
+        yield* restoreStoredFile(entry, reference);
       }
       return;
     }
 
     const machine = yield* MachineState;
     const rootEntry = stored.find((entry) => entry.path === root.absolute);
-    const rootState = rootEntry === undefined ? undefined : storedState(rootEntry);
+    const rootState = rootEntry?.state;
     const directories = stored.filter(
-      (entry): entry is StoredDirectory => "state" in entry && entry.state === "directory",
+      (entry): entry is StoredDirectory => entry.state === "directory",
     );
     const deepestDirectories = deepestPathFirst(directories, (entry) => entry.path);
     const rootDirectory = directories.find((entry) => entry.path === root.absolute);
     if (rootEntry !== undefined && rootState !== "absent" && rootState !== "directory") {
       for (const entry of deepestEntries) {
         if (entry === rootEntry) continue;
-        yield* restoreStoredFile(entry, root);
+        yield* restoreStoredFile(entry, reference, root);
       }
-      yield* restoreStoredFile(rootEntry);
+      yield* restoreStoredFile(rootEntry, reference);
       return;
     }
 
     if (rootDirectory !== undefined) {
-      yield* restoreStoredFile({ ...rootDirectory, mode: rootDirectory.mode | 0o700 });
+      yield* restoreStoredFile({ ...rootDirectory, mode: rootDirectory.mode | 0o700 }, reference);
     } else {
       const currentKind = yield* machine.inspectPath(root).pipe(
         Effect.catchTag("MachineFilesystemError", (error) =>
@@ -535,12 +489,12 @@ const restoreStoredFiles = (
 
     for (const directory of [...deepestDirectories].reverse()) {
       if (directory === rootEntry) continue;
-      yield* restoreStoredFile({ ...directory, mode: directory.mode | 0o700 }, root);
+      yield* restoreStoredFile({ ...directory, mode: directory.mode | 0o700 }, reference, root);
     }
 
     for (const entry of deepestEntries) {
-      if (entry === rootEntry || storedState(entry) === "directory") continue;
-      yield* restoreStoredFile(entry, root);
+      if (entry === rootEntry || entry.state === "directory") continue;
+      yield* restoreStoredFile(entry, reference, root);
     }
 
     for (const directory of deepestDirectories) {
@@ -598,15 +552,26 @@ const captureRollback = (
           && rootKind.kind !== "directory"
           && !sameMachinePath(path, root)
           ? Effect.succeed({ path: path.absolute, state: "absent" } as const)
-          : captureStoredFile(path, context.limits.maximumFileBytes),
+          : Effect.gen(function*() {
+            const entry = yield* captureStoredFile(path);
+            if (entry.state === "regular") {
+              const backup = yield* machine.normalizePath({ path: backupFile(rollbackPath.absolute, entry.path) });
+              yield* machine.atomicWrite({
+                path: backup,
+                content: { file: entry.path, digest: entry.digest },
+                mode: 0o600,
+              });
+            }
+            return entry;
+          }),
     );
     yield* machine.atomicWrite({
       path: rollbackPath,
       content: encoder.encode(JSON.stringify(stored)),
     });
     const restore = context.resource.policy === "append-local"
-      ? restoreAppendLocal(context, stored)
-      : restoreStoredFiles(stored, root);
+      ? restoreAppendLocal(context, stored, rollbackPath.absolute)
+      : restoreStoredFiles(stored, rollbackPath.absolute, root);
     return { reference: rollbackPath.absolute, stored, restore };
   });
 
@@ -684,11 +649,10 @@ export const restoreRollbackReference = (
       });
     }
     const expectedPaths = yield* rollbackPaths(context);
-    // Stored content is base64, so a valid file can exceed its raw byte limit
-    // once encoded. Include that expansion and each JSON path/envelope.
+    // Only metadata is inline. Allow escaped paths and native symlink text,
+    // independently of the size of any regular-file preimage.
     const maximumBytes = expectedPaths.reduce((total, path) => total
-      + 4 * Math.ceil(context.limits.maximumFileBytes / 3)
-      + Buffer.byteLength(JSON.stringify(path.absolute)) + 256, 2);
+      + Buffer.byteLength(JSON.stringify(path.absolute)) + 256 * 1024, 2);
     if (!Number.isSafeInteger(maximumBytes)) {
       return yield* new InvalidExecutionPlanError({
         message: `rollback material is too large for action ${context.action.id}`,
@@ -703,7 +667,7 @@ export const restoreRollbackReference = (
     )(decoder.decode(bytes)).pipe(
       Effect.mapError((error) =>
         new InvalidExecutionPlanError({
-          message: `invalid rollback material for action ${context.action.id}: ${String(error)}`,
+          message: `invalid rollback material for action ${context.action.id}: ${String(error)}. Recover old-format runs with the CLI that created them before upgrading.`,
         })
       ),
     );
@@ -725,9 +689,9 @@ export const restoreRollbackReference = (
       ? yield* targetPath(context.action.detail.target)
       : undefined;
     if (context.resource.policy === "append-local") {
-      yield* restoreAppendLocal(context, stored);
+      yield* restoreAppendLocal(context, stored, reference);
     } else {
-      yield* restoreStoredFiles(stored, root);
+      yield* restoreStoredFiles(stored, reference, root);
     }
   });
 
@@ -743,7 +707,7 @@ type StoredTextFile = Extract<StoredFile, { readonly state: "absent" | "regular"
 
 const textSnapshot = (stored: ReadonlyArray<StoredFile>): Effect.Effect<StoredTextFile, InvalidExecutionPlanError> => {
   const entry = stored[0];
-  return stored.length === 1 && entry !== undefined && "state" in entry
+  return stored.length === 1 && entry !== undefined
     && (entry.state === "absent" || entry.state === "regular")
     ? Effect.succeed(entry)
     : Effect.fail(new InvalidExecutionPlanError({ message: "append-local requires a regular text file" }));
@@ -753,15 +717,24 @@ const textSnapshot = (stored: ReadonlyArray<StoredFile>): Effect.Effect<StoredTe
 const appendLocalOutput = (
   context: ResourceExecutionContext,
   before: StoredTextFile,
-): Effect.Effect<{ readonly content: Uint8Array | undefined; readonly mode: number }, SynchronizationExecutionInputError> =>
+  reference: string,
+): Effect.Effect<{ readonly content: Uint8Array | undefined; readonly mode: number }, SynchronizationExecutionInputError | MachineStateError, MachineState> =>
   Effect.gen(function*() {
     const desired = context.desired;
     if (desired.kind !== "file" || desired.symlinkTo !== undefined || desired.executable
       || ((desired.mode ?? 0) & 0o111) !== 0) {
       return yield* new InvalidExecutionPlanError({ message: "append-local requires a non-executable regular text file" });
     }
-    const current = before.state === "absent" ? undefined : yield* Effect.try({
-      try: () => parseTextComposition(Buffer.from(before.content, "base64")),
+    const machine = yield* MachineState;
+    const bytesBefore = before.state === "absent" ? undefined : yield* machine.readFile({
+      path: yield* targetPath(backupFile(reference, before.path)),
+      maximumBytes: context.limits.maximumFileBytes,
+    });
+    if (before.state === "regular" && bytesBefore !== undefined && sha256BytesHex(bytesBefore) !== before.digest) {
+      return yield* new InvalidExecutionPlanError({ message: `rollback backup digest mismatch: ${before.path}` });
+    }
+    const current = bytesBefore === undefined ? undefined : yield* Effect.try({
+      try: () => parseTextComposition(bytesBefore),
       catch: (error) => new InvalidExecutionPlanError({ message: `cannot compose ${before.path}: ${String(error)}` }),
     });
     const mode = context.action.detail.kind === "remove-resource" && before.state === "regular"
@@ -801,9 +774,9 @@ const appendLocalOutput = (
   });
 
 const sameTextSnapshot = (left: StoredFile, right: StoredTextFile): boolean =>
-  "state" in left && (left.state === "absent" && right.state === "absent"
+  left.state === "absent" && right.state === "absent"
     || left.state === "regular" && right.state === "regular"
-      && left.content === right.content && left.mode === right.mode);
+      && left.digest === right.digest && left.mode === right.mode;
 
 /** Refuse links and special objects before any file read, including recovery. */
 const inspectTextTarget = (path: MachinePath) => Effect.gen(function*() {
@@ -821,22 +794,22 @@ const inspectTextTarget = (path: MachinePath) => Effect.gen(function*() {
  * A full backup is evidence, not permission to overwrite later local edits.
  * Recovery accepts only the exact pre- or post-write state of this action.
  */
-const restoreAppendLocal = (context: ResourceExecutionContext, stored: ReadonlyArray<StoredFile>) =>
+const restoreAppendLocal = (context: ResourceExecutionContext, stored: ReadonlyArray<StoredFile>, reference: string) =>
   Effect.gen(function*() {
     const before = yield* textSnapshot(stored);
     const path = yield* targetPath(before.path);
     yield* inspectTextTarget(path);
-    const current = yield* captureStoredFile(path, context.limits.maximumFileBytes);
+    const current = yield* captureStoredFile(path);
     if (sameTextSnapshot(current, before)) return;
-    const { content, mode } = yield* appendLocalOutput(context, before);
+    const { content, mode } = yield* appendLocalOutput(context, before, reference);
     const after: StoredTextFile = content === undefined ? { path: before.path, state: "absent" } : {
-      path: before.path, state: "regular", content: Buffer.from(content).toString("base64"),
+      path: before.path, state: "regular", digest: sha256BytesHex(content),
       mode,
     };
     if (!sameTextSnapshot(current, after)) {
       return yield* new InvalidExecutionPlanError({ message: `append-local target changed after the action: ${before.path}. Inspect the retained rollback backup before recovering.` });
     }
-    yield* restoreStoredFile(before);
+    yield* restoreStoredFile(before, reference);
   });
 
 const prepareAppendLocal = (context: ResourceExecutionContext, target: string) =>
@@ -845,10 +818,10 @@ const prepareAppendLocal = (context: ResourceExecutionContext, target: string) =
     yield* inspectTextTarget(path);
     const rollback = yield* captureRollback(context, [path]);
     const before = yield* textSnapshot(rollback.stored);
-    const { content, mode } = yield* appendLocalOutput(context, before);
+    const { content, mode } = yield* appendLocalOutput(context, before, rollback.reference);
     const execute = Effect.gen(function*() {
       yield* inspectTextTarget(path);
-      const current = yield* captureStoredFile(path, context.limits.maximumFileBytes);
+      const current = yield* captureStoredFile(path);
       if (!sameTextSnapshot(current, before)) {
         return yield* new InvalidExecutionPlanError({ message: `append-local target changed while preparing: ${target}. Replan synchronization.` });
       }

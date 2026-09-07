@@ -206,7 +206,9 @@ recovery cannot overwrite an unexpected edit to that section. Rollback captures
 the whole file and its permissions before composition, just as for replacement.
 Restoration requires the exact pre-write or expected post-write state. If local
 text changes after a write, rollback stops without overwriting it and retains the
-failed run's backups for manual recovery. Removing the Source section leaves a
+action's backup for manual recovery. Terminal cleanup removes the other action
+backups, including those restored successfully; policy presence alone never
+retains a backup. Removing the Source section leaves a
 regular file, including an empty file when no local text remains.
 These state checks do not lock external editors. Avoid saving the file while a
 sync is writing it; an editor can race the final atomic replacement.

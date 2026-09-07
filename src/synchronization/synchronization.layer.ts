@@ -51,6 +51,7 @@ const makeSynchronization = Effect.gen(function*() {
               } as const,
               appliedResources: [],
               removedResources: [],
+              failedRollbacks: [],
             })
           ),
         );
@@ -62,11 +63,10 @@ const makeSynchronization = Effect.gen(function*() {
           appliedResources: result.appliedResources,
           removedResources: result.removedResources,
         });
-        // A refused append-local rollback leaves evidence for manual recovery.
-        const retainTextBackup = result.outcome.outcome === "Failed"
-          && input.revision.resources.some((resource) => resource.policy === "append-local");
-        if (result.outcome.outcome !== "Interrupted" && !retainTextBackup) {
-          yield* cleanupRollbackSnapshots(input.id, input.plan.actions.map((action) => action.id)).pipe(
+        if (result.outcome.outcome !== "Interrupted") {
+          yield* cleanupRollbackSnapshots(
+            input.id, input.plan.actions.map((action) => action.id), result.failedRollbacks,
+          ).pipe(
             Effect.provideService(MachineState, machine),
             Effect.mapError((error) => new RollbackCleanupError({
               run: input.id,
@@ -96,12 +96,11 @@ const makeSynchronization = Effect.gen(function*() {
           appliedResources: result.appliedResources,
           removedResources: result.removedResources,
         });
-        const retainTextBackup = result.outcome.outcome === "Failed"
-          && input.revision.resources.some((resource) => resource.policy === "append-local");
-        if (result.outcome.outcome !== "Interrupted" && !retainTextBackup) {
+        if (result.outcome.outcome !== "Interrupted") {
           yield* cleanupRollbackSnapshots(
             result.outcome.run,
             recovery?.run.plan.actions.map((action) => action.id) ?? [],
+            result.failedRollbacks,
           ).pipe(
             Effect.provideService(MachineState, machine),
             Effect.mapError((error) => new RollbackCleanupError({

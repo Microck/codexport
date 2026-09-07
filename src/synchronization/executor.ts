@@ -54,6 +54,7 @@ export interface SynchronizationExecutionResult {
   readonly outcome: SynchronizationOutcome;
   readonly appliedResources: ReadonlyArray<AppliedResourceRecord>;
   readonly removedResources: ReadonlyArray<ResourceId>;
+  readonly failedRollbacks: ReadonlyArray<ActionId>;
 }
 
 export interface ActionState {
@@ -96,11 +97,13 @@ export const executionLimits = (
  * The exact paths make cleanup idempotent and prevent a terminal run from
  * touching another run's material. Cleanup is intentionally separate from
  * repository completion so a cleanup failure cannot erase the primary
- * terminal outcome.
+ * terminal outcome. Failed inverses keep their own snapshots for manual
+ * recovery; unrelated snapshots are still cleaned up.
  */
 export const cleanupRollbackSnapshots = (
   run: SynchronizationRunInput["id"],
   actions: ReadonlyArray<ActionId>,
+  failedRollbacks: ReadonlyArray<ActionId>,
 ): Effect.Effect<void, MachineStateError, MachineState> =>
   Effect.gen(function*() {
     const machine = yield* MachineState;
@@ -109,7 +112,8 @@ export const cleanupRollbackSnapshots = (
       path: `canonfig/rollback/${run}`,
       base: directories.cache,
     });
-    const references = [...new Set(actions)].flatMap((action) => [
+    const retained = new Set(failedRollbacks);
+    const references = [...new Set(actions)].filter((action) => !retained.has(action)).flatMap((action) => [
       `${sha256Hex(action)}.json`,
       `${sha256Hex(action)}.schedule.json`,
     ]);
@@ -126,6 +130,7 @@ export const cleanupRollbackSnapshots = (
         ),
       );
     }
+    if (retained.size > 0) return;
     yield* machine.removeEmptyDirectory({ path: directory }).pipe(
       Effect.catchTag("MachineFilesystemError", (error) =>
         /\b(?:ENOENT|ENOTDIR)\b/u.test(error.message)
@@ -391,6 +396,8 @@ export interface ActionResult {
   /** Runtime inverse retained until physical and ownership changes are terminal. */
   readonly rollback?: Effect.Effect<void, unknown, MachineState> | undefined;
   readonly rollbackReference?: string | undefined;
+  /** Physical rollback failed, so terminal cleanup must preserve its snapshot. */
+  readonly rollbackFailed?: boolean | undefined;
 }
 
 export const driftResult = (
@@ -709,24 +716,25 @@ export const executeSynchronizationAction = (
     return yield* work.pipe(
       Effect.catch((error) =>
         rollbackPrepared(prepared).pipe(
-          Effect.andThen(journal(
-            input.id,
-            state.action.id,
-            "failed",
+          Effect.match({
+            onSuccess: (): ActionResult => ({
+              kind: "failed", reason: redact(error, input.knownSecrets ?? []),
+            }),
+            onFailure: (rollbackError): ActionResult => ({
+              kind: "failed", reason: redact(rollbackError, input.knownSecrets ?? []),
+              rollbackFailed: true, rollbackReference: prepared?.rollbackReference,
+            }),
+          }),
+          Effect.flatMap((failure) => journal(
+            input.id, state.action.id, "failed",
             { status: "not-run", method: "action-failed" },
-            prepared?.rollbackReference,
-            attempt,
+            prepared?.rollbackReference, attempt,
+          ).pipe(
+            Effect.as(failure),
+            Effect.catch((journalError) => Effect.succeed({
+              ...failure, reason: redact(journalError, input.knownSecrets ?? []),
+            })),
           )),
-          Effect.as({
-            kind: "failed",
-            reason: redact(error, input.knownSecrets ?? []),
-          } satisfies ActionResult),
-          Effect.catch((journalError) =>
-            Effect.succeed({
-              kind: "failed",
-              reason: redact(journalError, input.knownSecrets ?? []),
-            } satisfies ActionResult)
-          ),
         )
       ),
     );
@@ -765,6 +773,7 @@ export const executeSynchronizationPlan = (
     const human: Array<HumanAction> = [];
     const drift: Array<DriftConflict> = [];
     const removedResources = new Set<ResourceId>();
+    const failedRollbacks: Array<ActionId> = [];
     const completedRollbacks: Array<{
       readonly action: ActionId;
       readonly resource?: ResourceId | undefined;
@@ -777,6 +786,7 @@ export const executeSynchronizationPlan = (
       for (let index = 0; index < states.length; index += 1) {
         const state = states[index]!;
         const result = yield* executeSynchronizationAction(input, state);
+        if (result.rollbackFailed) failedRollbacks.push(state.action.id);
         completedActions.push(state.action.id);
         if (result.kind === "verified" && result.rollback !== undefined) {
           completedRollbacks.push({
@@ -805,6 +815,9 @@ export const executeSynchronizationPlan = (
                   record.resource === completed.resource
                 );
               yield* completed.rollback.pipe(
+                Effect.tapError(() => Effect.sync(() => {
+                  failedRollbacks.push(completed.action);
+                })),
                 Effect.andThen(journal(
                   input.id,
                   completed.action,
@@ -904,6 +917,7 @@ export const executeSynchronizationPlan = (
     }
     return {
       outcome,
+      failedRollbacks,
       appliedResources: applied,
       removedResources: outcome.outcome === "Converged"
         ? [...removedResources].sort()

@@ -70,6 +70,8 @@ import { planSynchronization } from "../../src/synchronization/planner.ts";
 import { RollbackCleanupError } from "../../src/synchronization/synchronization.errors.ts";
 import {
   defaultSynchronizationExecutionLimits,
+  executeSynchronizationAction,
+  executionContexts,
 } from "../../src/synchronization/executor.ts";
 import {
   getConfigPath,
@@ -3056,6 +3058,102 @@ if (process.argv.slice(2).some((value) =>
     await expect(access(dirname(String(reference)))).rejects.toMatchObject({
       code: "ENOENT",
     });
+  });
+
+  it.each(["run", "recover"] as const)("retains only failed rollback snapshots during %s", async (operation) => {
+    for (const textState of ["no-op", "restored", "edited"] as const) {
+      const base = fileFixture(temporaryDirectory());
+      const text = appendLocalContext(base.root);
+      const desired = { ...text.desired, mode: 0o600 };
+      const normal = { ...text.resource, id: decode(ResourceId)("a-normal"), policy: "replace" as const,
+        target: join(base.root, "home", "normal.txt") };
+      const failing = { ...normal, id: decode(ResourceId)("zz-failing"), kind: "config" as const,
+        target: join(base.root, "home", "failing.json") };
+      const configBytes = Buffer.from('{"shared":true}');
+      const configDigest = decode(ContentDigest)(sha256BytesHex(configBytes));
+      const original = textState === "no-op"
+        ? composeTextFile("canonical content", { kind: "unmanaged", local: "local\n" })
+        : Buffer.from("local\n");
+      await mkdir(dirname(base.target), { recursive: true });
+      await writeFile(base.target, original);
+      chmodSync(base.target, 0o600);
+      await writeFile(failing.target, '{"local":true}');
+      // A real child edits the text after the earlier action, then fails its
+      // own verification. No timers or substituted filesystem operations.
+      const command = textState === "edited"
+        ? `require('node:fs').appendFileSync(${JSON.stringify(base.target)}, 'later edit\\n'); process.exit(1)`
+        : "process.exit(1)";
+      const revision: PlanningProfileRevision = {
+        ...base.revision,
+        resources: [normal, text.resource, failing],
+        desired: [
+          { resource: normal.id, desired, verification: text.verification },
+          { resource: text.resource.id, desired, verification: text.verification },
+          { resource: failing.id,
+            desired: { kind: "config", format: "json", digest: configDigest, keys: ["shared"] },
+            verification: { method: "command", command: [process.execPath, "-e", command] } },
+        ],
+      };
+      const plan = Effect.runSync(planSynchronization({
+        revision, follower: follower.id, localOverlay: [], appliedResources: [],
+        observedState: { platform: "linux", availableBlobs: [], resources: [
+          { resource: normal.id, observed: { state: "absent" } },
+          { resource: text.resource.id, observed: textState === "no-op"
+            ? { state: "present", objectKind: "regular", executable: false, mode: 0o600,
+              digest: sha256BytesHex(original), managedSourceDigest: base.artifact.digest }
+            : { state: "absent" } },
+          { resource: failing.id, observed: { state: "absent" } },
+        ] },
+      }));
+      const input = { ...base.input, revision, plan,
+        artifacts: [base.artifact, { digest: configDigest, content: configBytes }] };
+      const fixture = { ...base, revision, input };
+      const layer = applicationLayer(fixture);
+      let outcome: SynchronizationOutcome;
+      if (operation === "run") {
+        outcome = await seedAndRun(fixture);
+      } else {
+        await Effect.runPromise(Effect.gen(function*() {
+          const repository = yield* StateRepository;
+          yield* repository.registerFollower({ follower });
+          yield* repository.publishRevision({ revision });
+          yield* repository.startRun({ id: input.id, follower: follower.id, revision: revision.id,
+            plan, startedAt: "2026-09-07T00:00:00Z" });
+          const states = yield* executionContexts(input, defaultSynchronizationExecutionLimits);
+          // Recovery must handle already-journaled successes, not only pending work.
+          for (const state of states.filter((entry) => entry.action.resource !== failing.id)) {
+            expect((yield* executeSynchronizationAction(input, state)).kind).toBe("verified");
+          }
+        }).pipe(Effect.provide(layer)));
+        outcome = await Effect.runPromise(Effect.flatMap(Synchronization, (synchronization) =>
+          synchronization.recover({ follower: follower.id, revision, artifacts: input.artifacts })
+        ).pipe(Effect.provide(applicationLayer(fixture))));
+      }
+      expect(outcome.outcome).toBe("Failed");
+      expect(await readFile(failing.target, "utf8")).toBe('{"local":true}');
+      await expect(access(normal.target)).rejects.toMatchObject({ code: "ENOENT" });
+      const references = [...new Set(actionRows(base.database).flatMap((row) =>
+        row.rollback_reference === null ? [] : [decode(Schema.String)(row.rollback_reference)]
+      ))];
+      expect(references.length).toBe(textState === "no-op" ? 2 : 3);
+      const textAction = plan.actions.find((action) => action.resource === text.resource.id);
+      if (textAction === undefined) throw new Error("missing text action");
+      for (const reference of references) {
+        if (textState === "edited" && reference.endsWith(`${sha256Hex(textAction.id)}.json`)) {
+          expect(await readFile(reference, "utf8")).toContain(Buffer.from("local\n").toString("base64"));
+        } else {
+          await expect(access(reference)).rejects.toMatchObject({ code: "ENOENT" });
+        }
+      }
+      if (textState === "edited") {
+        expect(parseTextComposition(await readFile(base.target))).toEqual({
+          kind: "managed", source: "canonical content", local: "local\nlater edit\n",
+        });
+      } else {
+        expect(await readFile(base.target)).toEqual(Buffer.from(original));
+        await expect(access(dirname(references[0]!))).rejects.toMatchObject({ code: "ENOENT" });
+      }
+    }
   });
 
   it("preserves the committed terminal outcome when rollback cleanup fails", async () => {

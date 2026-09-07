@@ -66,6 +66,8 @@ export type ActionDetail =
     /** Normalized regular-file executable intent; absent for non-file writes. */
     readonly executable?: boolean | undefined;
     readonly mode?: number | undefined;
+    /** Source baseline retained by a persisted append-local action. */
+    readonly previousSourceDigest?: string | undefined;
   }
   | {
     readonly kind: "write-config";
@@ -196,6 +198,8 @@ export type ObservedResourceState =
   | {
     readonly state: "present";
     readonly digest: string;
+    /** Digest of the marked Source payload, independent of local additions. */
+    readonly managedSourceDigest?: string | undefined;
     readonly executable: boolean;
     readonly mode?: number | undefined;
     /**
@@ -220,7 +224,7 @@ export interface AppliedResourceRecord {
   readonly digest: string;
   readonly appliedAt: string;
   readonly kind?: "file" | "directory" | "config" | "skill" | "tool" | "credential" | undefined;
-  readonly policy?: "replace" | "mirror-owned" | "merge" | "replace-if-unmodified" | "ensure" | "require-local" | undefined;
+  readonly policy?: "replace" | "mirror-owned" | "merge" | "replace-if-unmodified" | "append-local" | "ensure" | "require-local" | undefined;
   readonly target?: string | undefined;
   readonly executable?: boolean | undefined;
   readonly mode?: number | undefined;
@@ -288,6 +292,7 @@ export const ActionDetailSchema = Schema.Union([
     digest: ContentDigest,
     executable: Schema.optional(Schema.Boolean),
     mode: Schema.optional(Schema.Int),
+    previousSourceDigest: Schema.optional(ContentDigest),
   }),
   Schema.Struct({
     kind: Schema.Literal("write-config"),
@@ -434,6 +439,7 @@ export const ObservedResourceStateSchema = Schema.Union([
   Schema.Struct({
     state: Schema.Literal("present"),
     digest: ContentDigest,
+    managedSourceDigest: Schema.optional(ContentDigest),
     executable: Schema.Boolean,
     mode: Schema.optional(Schema.Int),
     objectKind: Schema.optional(ObservedObjectKind),
@@ -482,6 +488,7 @@ export const AppliedResourceRecordSchema = Schema.Struct({
     "mirror-owned",
     "merge",
     "replace-if-unmodified",
+    "append-local",
     "ensure",
     "require-local",
   ])),

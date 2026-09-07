@@ -137,6 +137,8 @@ JSON numbers are decimal. The comments above show their octal permission forms.
   preserving the **Local Overlay**.
 - **`replace-if-unmodified`** writes only when current content matches the
   Applied Resource Record or already matches desired content.
+- **`append-local`** puts Source text first and preserves follower-local text
+  after it. Only regular, non-executable UTF-8 text files support this policy.
 - **`ensure`** reaches and verifies a capability without removing unrelated
   software.
 - **`require-local`** verifies a local credential reference and otherwise
@@ -147,6 +149,50 @@ JSON numbers are decimal. The comments above show their octal permission forms.
   The resource's Apply Policy independently decides how those bytes may affect
   Observed State.
 </Callout>
+
+### Keep local instructions with `append-local`
+
+Use `"policy": "append-local"` on a `file` resource such as `AGENTS.md`. Keep
+the file's normal `spec.content` and digest verification: that digest identifies
+the Source text, not the combined follower file. Existing policies do not change.
+
+Canonfig writes this layout:
+
+```md title="Follower AGENTS.md"
+<!-- canonfig:source:start -->
+Source instructions
+<!-- canonfig:source:end -->
+
+Follower-local instructions
+```
+
+Edit local instructions below the closing marker. On first adoption, Canonfig
+preserves a differing existing file in full as local text. If it exactly matches
+Source, Canonfig adds the markers without duplicating the text. A missing file
+starts with no local additions. Make a backup before choosing a new policy.
+
+Later syncs replace only the Source section. They preserve local text, including
+its whitespace and line endings, and do not append another copy. Changing or
+removing an existing Source section produces drift; move intentional edits below
+the closing marker before syncing. Malformed or repeated markers require manual
+repair. Deleting the whole file allows Canonfig to recreate the Source section.
+
+Removing the resource from the profile removes only its unchanged Source section
+and leaves local text in place, or an empty file if there is none. A later failure
+restores the full backup only if the file still matches the action's expected
+output. If you edit it after the write, rollback stops and retains the backup
+under the machine's Canonfig cache at `rollback/<run-id>/` for manual recovery.
+Successful runs remove rollback backups; these are not a long-term file archive.
+Avoid saving the file while a sync is writing it. Canonfig checks for changed
+content before replacing a file, but it does not lock external editors.
+
+Source content cannot contain these reserved markers or NUL characters, and
+symlinks and executable files cannot use this policy.
+
+This is text composition, not a semantic merge. A differing file adopted for the
+first time can contain older shared rules as well as local rules. Canonfig does
+not guess which to discard or which conflicting instruction takes precedence.
+Review that local text once; it remains follower-owned and is never uploaded.
 
 ## Verification
 

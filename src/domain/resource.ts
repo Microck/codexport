@@ -36,6 +36,7 @@ export const ApplyPolicy = Schema.Literals([
   "mirror-owned",
   "merge",
   "replace-if-unmodified",
+  "append-local",
   "ensure",
   "require-local",
 ]);
@@ -53,7 +54,7 @@ export const defaultPolicyForKind = {
 
 /** Which policies are compatible with which kinds. `ensure` and `require-local` are kind-specific. */
 const compatiblePolicies = {
-  file: ["replace", "replace-if-unmodified"],
+  file: ["replace", "replace-if-unmodified", "append-local"],
   directory: ["mirror-owned", "replace"],
   config: ["merge", "replace"],
   skill: ["replace-if-unmodified", "replace"],

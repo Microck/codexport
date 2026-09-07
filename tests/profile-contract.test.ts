@@ -35,6 +35,7 @@ import {
   type SynchronizationPlan,
 } from "../src/domain/synchronization.ts";
 import { FileResourceSpec } from "../src/domain/resource.ts";
+import { composeTextFile, parseTextComposition, sourceTextEnd, sourceTextStart } from "../src/domain/text-composition.ts";
 
 const fixture = (name: string): string =>
   readFileSync(new URL(`./fixtures/profile-contract/${name}`, import.meta.url), "utf8");
@@ -156,6 +157,61 @@ describe("filesystem authoring fidelity", () => {
       })).toThrow();
     },
   );
+});
+
+describe("append-local text contract", () => {
+  it.each(["", "shared", "shared\n", "\uFEFFshared\r\n東京\n"])("preserves exact Source and local payloads: %j", (source) => {
+    const local = "\uFEFFlocal\r\n\r\n";
+    const bytes = composeTextFile(source, { kind: "unmanaged", local });
+    expect(parseTextComposition(bytes)).toEqual({ kind: "managed", source, local });
+    expect(composeTextFile(source, parseTextComposition(bytes))).toEqual(bytes);
+    expect(parseTextComposition(composeTextFile("new Source", parseTextComposition(bytes))))
+      .toEqual({ kind: "managed", source: "new Source", local });
+  });
+
+  it("does not duplicate identical adopted text", () => {
+    expect(parseTextComposition(composeTextFile("same\n", { kind: "unmanaged", local: "same\n" })))
+      .toEqual({ kind: "managed", source: "same\n", local: "" });
+  });
+
+  it.each([
+    sourceTextStart,
+    sourceTextEnd,
+    `prefix\n${sourceTextStart}\nshared\n${sourceTextEnd}\n\nlocal`,
+    `${sourceTextStart}\nshared\n${sourceTextEnd}\nlocal`,
+    `${sourceTextStart}\nshared\n${sourceTextEnd}\n\n${sourceTextStart}`,
+    "binary\0text",
+  ])("rejects malformed local text without adopting it: %j", (text) => {
+    expect(() => parseTextComposition(new TextEncoder().encode(text))).toThrow();
+  });
+
+  it("rejects invalid UTF-8 instead of replacing bytes", () => {
+    expect(() => parseTextComposition(Uint8Array.of(0xff))).toThrow();
+  });
+
+  it.each([
+    { content: "text", executable: true },
+    { content: "text", mode: 0o610 },
+    { content: "text", symlinkTo: "elsewhere" },
+    { content: "binary\0text" },
+    { content: "invalid\uD800" },
+    { content: sourceTextStart },
+    { content: sourceTextEnd },
+  ])("rejects unsupported Source spec: %j", (spec) => {
+    const resource = fileResource("instructions", {
+      policy: "append-local", spec: { kind: "file", ...spec },
+      verify: { method: "digest", digest: sha256Hex(spec.content) },
+    });
+    expect(() => Schema.decodeUnknownSync(ProfileResourceInputSchema)(resource)).toThrow();
+    expect(validateProfileResources([resource]).map((error) => error._tag)).toContain("InvalidTextCompositionError");
+  });
+
+  it("accepts an opt-in ordinary text file and persists the Source baseline", () => {
+    expect(Schema.decodeUnknownSync(ProfileResourceInputSchema)(fileResource("instructions", { policy: "append-local" })).policy)
+      .toBe("append-local");
+    const action = { kind: "write-file", target: "~/AGENTS.md", digest: digestA, previousSourceDigest: digestB };
+    expect(Schema.decodeUnknownSync(ActionDetailSchema)(action)).toEqual(action);
+  });
 });
 
 describe("profile schedule default portability", () => {
@@ -598,4 +654,3 @@ describe("resource graph validation", () => {
       ]);
   });
 });
-

@@ -85,6 +85,7 @@ import {
   synchronizeFollower,
 } from "../../src/synchronization/follower-orchestration.ts";
 import { SynchronizationLive } from "../../src/synchronization/synchronization.layer.ts";
+import { parseTextComposition } from "../../src/domain/text-composition.ts";
 
 const decode = Schema.decodeUnknownSync;
 const roots: Array<string> = [];
@@ -373,6 +374,10 @@ describe(`cross-platform acceptance (${acceptancePlatform()})`, () => {
       ).pipe(Effect.provide(followerMachine.layer)),
     );
     const managedFile = join(followerMachine.home, "managed.txt");
+    const instructionsFile = join(followerMachine.home, "AGENTS.md");
+    const localInstructions = "Local instructions\r\n東京\n";
+    mkdirSync(followerMachine.home, { recursive: true });
+    await writeFile(instructionsFile, localInstructions);
     const configFile = join(followerMachine.home, "settings.json");
     const skillRoot = join(followerMachine.home, "skills", "acceptance");
     const scheduleFile = join(followerMachine.home, "schedule.json");
@@ -427,6 +432,13 @@ describe(`cross-platform acceptance (${acceptancePlatform()})`, () => {
               { path: "telemetry", value: false },
             ],
           },
+        ),
+        resource(
+          "b-instructions",
+          "file",
+          "append-local",
+          instructionsFile,
+          { kind: "file", content: "Source instructions\n", executable: false },
         ),
         resource(
           "c-skill",
@@ -778,6 +790,16 @@ describe(`cross-platform acceptance (${acceptancePlatform()})`, () => {
       });
     }
     expect(await readFile(managedFile, "utf8")).toBe("canonical acceptance\n");
+    expect(parseTextComposition(await readFile(instructionsFile))).toEqual({
+      kind: "managed",
+      source: "Source instructions\n",
+      local: localInstructions,
+    });
+    const addedInstructions = "More local instructions\r\n";
+    await writeFile(instructionsFile, Buffer.concat([
+      await readFile(instructionsFile),
+      Buffer.from(addedInstructions),
+    ]));
     expect(JSON.parse(await readFile(configFile, "utf8"))).toEqual({
       theme: "dark",
       telemetry: false,
@@ -798,6 +820,11 @@ describe(`cross-platform acceptance (${acceptancePlatform()})`, () => {
       outcome: { outcome: "Converged" },
     });
     expect(server.blobRequests()).toBe(metadata.resources.length);
+    expect(parseTextComposition(await readFile(instructionsFile))).toEqual({
+      kind: "managed",
+      source: "Source instructions\n",
+      local: localInstructions + addedInstructions,
+    });
     expect(latestPlan(followerDatabase).actions.filter(
       (action) => action.kind !== "no-op",
     )).toEqual([]);

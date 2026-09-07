@@ -49,6 +49,7 @@ interface WriteFileActionDetail {
   readonly digest: ContentDigest;
   executable?: boolean;
   mode?: number;
+  previousSourceDigest?: string;
 }
 
 interface DriftConflictActionDetail {
@@ -309,6 +310,10 @@ const writeFile = (
   };
   if (executable !== undefined) detail.executable = executable;
   if (mode !== undefined) detail.mode = mode;
+  if (context.resource.policy === "append-local" && context.observed.state === "present"
+    && context.observed.managedSourceDigest !== undefined) {
+    detail.previousSourceDigest = context.observed.managedSourceDigest;
+  }
   return { kind: "write-file", detail };
 };
 
@@ -520,6 +525,33 @@ const planReplace = (context: ResourcePlanningContext): ReadonlyArray<ResourceAc
       context.desired.kind === "file" ? context.desired.mode : undefined,
     ),
   ];
+};
+
+/** Local additions are outside the owned digest; Source edits remain drift. */
+const planAppendLocal = (context: ResourcePlanningContext): ReadonlyArray<ResourceActionDraft> => {
+  const desired = context.desired;
+  if (desired.kind !== "file") {
+    throw new InvalidObservedStateError({ resource: context.resource.id, kind: context.resource.kind, observedState: context.observed.state });
+  }
+  const observed = context.observed;
+  if (observed.state === "unverifiable") {
+    return [{ kind: "human-action", detail: {
+      kind: "human-action",
+      reason: `Cannot read append-local target: ${observed.reason}`,
+      instructions: `Inspect ${context.resource.target}. Restore valid UTF-8 text and the Canonfig Source markers before retrying.`,
+    } }];
+  }
+  if (observed.state === "absent") return [writeFile(context, desired.digest, false, desired.mode)];
+  if (observed.state !== "present" || observed.objectKind !== "regular"
+    || (observed.managedSourceDigest === undefined && context.applied?.policy === "append-local")) {
+    return [driftConflict(context, desired.digest, observedDigest(context) ?? sha256Hex("canonfig:invalid-text-target"))];
+  }
+  if (observed.managedSourceDigest === undefined) {
+    return [writeFile(context, desired.digest, false, desired.mode)];
+  }
+  const sourceObserved = { ...observed, digest: observed.managedSourceDigest };
+  // Reuse the file permission and three-way drift rules with the owned payload.
+  return planReplaceIfUnmodified({ ...context, observed: sourceObserved });
 };
 
 const planMerge = (context: ResourcePlanningContext): ReadonlyArray<ResourceActionDraft> => {
@@ -943,6 +975,18 @@ const planRemovedResource = (
   ) {
     return [];
   }
+  if (context.resource.policy === "append-local") {
+    const observed = context.observed;
+    const ownedContext = observed.state === "present" && observed.managedSourceDigest !== undefined
+      ? { ...context, observed: { ...observed, digest: observed.managedSourceDigest } }
+      : context;
+    if (observed.state !== "absent" && (observed.state !== "present"
+      || observed.managedSourceDigest === undefined || !observedMatchesApplied(ownedContext))) {
+      return [driftConflict(context, Schema.decodeUnknownSync(ContentDigestSchema)(applied.digest),
+        observedDigest(context) ?? sha256Hex("canonfig:invalid-text-target"))];
+    }
+    return [{ kind: "remove-resource", detail: { kind: "remove-resource", target: applied.target, paths: [], keys: [] } }];
+  }
   if (!observedMatchesApplied(context)) return [];
   switch (context.resource.kind) {
     case "file":
@@ -1029,6 +1073,8 @@ export const planResource = (
       return planMerge(context);
     case "replace-if-unmodified":
       return planReplaceIfUnmodified(context);
+    case "append-local":
+      return planAppendLocal(context);
     case "ensure":
       return planEnsure(context);
     case "require-local":

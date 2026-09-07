@@ -236,6 +236,10 @@ export const failureTaxonomy = {
     "usage-or-configuration",
     (error) => `resource ${text(error.id)} declares an invalid target path`,
   ),
+  InvalidTextCompositionError: describe(
+    "usage-or-configuration",
+    (error) => `resource ${text(error.id)} cannot use append-local: ${text(error.reason)}. Correct its file specification before publishing.`,
+  ),
   MissingDependencyError: describe(
     "usage-or-configuration",
     (error) => `resource ${text(error.id)} depends on a resource the profile does not declare`,
@@ -300,6 +304,10 @@ export const failureTaxonomy = {
     "usage-or-configuration",
     (error) =>
       `resource ${text(error.resource)} was published as ${text(error.publishedKind)} but is now declared ${text(error.desiredKind)}`,
+  ),
+  PlannerTextCompositionError: describe(
+    "usage-or-configuration",
+    (error) => `resource ${text(error.resource)} cannot use append-local: ${text(error.reason)}. Correct the Source profile and publish a new revision.`,
   ),
   PlannerVerificationContentMismatchError: describe(
     "usage-or-configuration",

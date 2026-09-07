@@ -27,6 +27,7 @@ import {
   type VerificationInput,
 } from "../domain/profile.ts";
 import type { ObservedResourceState } from "../domain/synchronization.ts";
+import { parseTextComposition } from "../domain/text-composition.ts";
 import type { AppliedResourceRecord } from "../domain/synchronization.ts";
 import {
   fetchRevision,
@@ -65,6 +66,7 @@ import {
   type FollowerAgentHarnessConfiguration,
 } from "./follower-sync-config.ts";
 import { planSynchronization } from "./planner.ts";
+import { defaultSynchronizationExecutionLimits } from "./executor.ts";
 import type {
   AvailableBlob,
   DesiredResource,
@@ -398,6 +400,7 @@ const desiredFor = (
 const observeFile = (
   target: string,
   desired: Extract<DesiredResource, { readonly kind: "file" }>,
+  policy: ProfileRevision["resources"][number]["policy"],
 ): Effect.Effect<ObservedResourceState, never, MachineState> =>
   Effect.gen(function*() {
     const machine = yield* MachineState;
@@ -431,6 +434,21 @@ const observeFile = (
         executable: false,
         objectKind: "regular",
       } as const;
+    }
+    if (policy === "append-local") {
+      const bytes = yield* machine.readFile({ path, maximumBytes: defaultSynchronizationExecutionLimits.maximumFileBytes });
+      const composition = yield* Effect.try(() => parseTextComposition(bytes));
+      const permissions = yield* machine.permissions(path);
+      const observation = {
+        state: "present",
+        digest: sha256BytesHex(bytes),
+        executable: permissions.executableByOwner,
+        mode: permissions.mode,
+        objectKind: "regular",
+      } as const;
+      return composition.kind === "managed"
+        ? { ...observation, managedSourceDigest: sha256Hex(composition.source) }
+        : observation;
     }
     return yield* machine.digestFile({ path }).pipe(
       Effect.flatMap((digest) =>
@@ -526,7 +544,7 @@ const observe = (
 ): Effect.Effect<ObservedResourceState, never, MachineState> => {
   switch (desired.kind) {
     case "file":
-      return observeFile(decoded.resource.target, desired);
+      return observeFile(decoded.resource.target, desired, decoded.resource.policy);
     case "config":
       return observeConfig(decoded, desired);
     case "directory":

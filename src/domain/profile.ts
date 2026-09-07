@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import { sourceTextIssue } from "./text-composition.ts";
 
 import type {
   ContentDigest,
@@ -274,6 +275,14 @@ const verificationAllowedForSpec = (
   return verificationAllowed(kind, method);
 };
 
+const appendLocalIssue = (resource: Pick<ProfileResourceInput, "policy" | "spec">): string | undefined => {
+  if (resource.policy !== "append-local" || resource.spec.kind !== "file") return undefined;
+  const spec = resource.spec;
+  return spec.symlinkTo !== undefined || spec.executable === true || ((spec.mode ?? 0) & 0o111) !== 0
+    ? "append-local requires a non-executable regular text file"
+    : sourceTextIssue(spec.content);
+};
+
 const verificationContentIssue = (
   resource: Pick<ProfileResourceInput, "kind" | "spec" | "verify">,
 ): string | undefined => {
@@ -315,7 +324,8 @@ export const ProfileResourceInputSchema = Schema.Struct({
         issue: verificationIssue,
       };
     }
-    return undefined;
+    const compositionIssue = appendLocalIssue(resource);
+    return compositionIssue === undefined ? undefined : { path: ["spec"], issue: compositionIssue };
   }),
 );
 
@@ -517,6 +527,11 @@ export class InvalidRecipeError extends Schema.TaggedError<InvalidRecipeError>()
   { id: Schema.String, reason: Schema.String },
 ) {}
 
+export class InvalidTextCompositionError extends Schema.TaggedError<InvalidTextCompositionError>()(
+  "InvalidTextCompositionError",
+  { id: Schema.String, reason: Schema.String },
+) {}
+
 export type ProfileValidationError =
   | DuplicateResourceError
   | MissingDependencyError
@@ -532,6 +547,7 @@ export type ProfileValidationError =
   | VerificationContentMismatchError
   | UnmanageableFilesystemModeError
   | InvalidBuildPolicyError
+  | InvalidTextCompositionError
   | InvalidRecipeError;
 
 /** Aggregate contract failure preserving all precise tagged graph errors. */
@@ -606,6 +622,10 @@ export const validateProfileResources = (
       errors.push(new PolicyKindMismatchError({ id: resource.id, kind, policy }));
     }
     errors.push(...validateRecipes(resource));
+    const compositionIssue = appendLocalIssue(resource);
+    if (compositionIssue !== undefined) {
+      errors.push(new InvalidTextCompositionError({ id: resource.id, reason: compositionIssue }));
+    }
     errors.push(...validateVerificationContent(resource));
     errors.push(...validateFilesystemModes(resource));
     errors.push(...validateBuildPolicies(resource));

@@ -62,7 +62,10 @@ const makeSynchronization = Effect.gen(function*() {
           appliedResources: result.appliedResources,
           removedResources: result.removedResources,
         });
-        if (result.outcome.outcome !== "Interrupted") {
+        // A refused append-local rollback leaves evidence for manual recovery.
+        const retainTextBackup = result.outcome.outcome === "Failed"
+          && input.revision.resources.some((resource) => resource.policy === "append-local");
+        if (result.outcome.outcome !== "Interrupted" && !retainTextBackup) {
           yield* cleanupRollbackSnapshots(input.id, input.plan.actions.map((action) => action.id)).pipe(
             Effect.provideService(MachineState, machine),
             Effect.mapError((error) => new RollbackCleanupError({
@@ -93,7 +96,9 @@ const makeSynchronization = Effect.gen(function*() {
           appliedResources: result.appliedResources,
           removedResources: result.removedResources,
         });
-        if (result.outcome.outcome !== "Interrupted") {
+        const retainTextBackup = result.outcome.outcome === "Failed"
+          && input.revision.resources.some((resource) => resource.policy === "append-local");
+        if (result.outcome.outcome !== "Interrupted" && !retainTextBackup) {
           yield* cleanupRollbackSnapshots(
             result.outcome.run,
             recovery?.run.plan.actions.map((action) => action.id) ?? [],

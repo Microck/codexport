@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "project": { "name": "reviewed-harness-migration" },
+  "targets": ["claude-code", "antigravity"],
+  "instructions": { "root": "instructions/AGENTS.md", "rules": [] },
+  "skills": { "roots": [] },
+  "mcp": {
+    "servers": {
+      "docs": {
+        "transport": "streamable-http",
+        "url": "https://mcp.example.invalid/mcp",
+        "enabled": true,
+        "headers": {}
+      }
+    }
+  },
+  "hooks": [],
+  "agents": [],
+  "commands": [],
+  "permissions": { "rules": [] },
+  "extensions": {}
+}

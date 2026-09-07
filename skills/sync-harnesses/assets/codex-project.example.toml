@@ -1,0 +1,7 @@
+# Documentation fixture: this harness-specific model remains native.
+model = "codex-only-model"
+
+# Reviewed as streamable HTTP; this URL is not a real service.
+[mcp_servers.docs]
+url = "https://mcp.example.invalid/mcp"
+enabled = true

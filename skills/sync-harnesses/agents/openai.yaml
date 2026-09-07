@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sync Harness Configurations"
+  short_description: "Share harness configuration locally or across machines"
+  default_prompt: "Use $sync-harnesses to migrate my existing harness settings into reviewed Canonfig sources and sync selected harnesses locally or on explicitly selected remote machines."

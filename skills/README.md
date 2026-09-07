@@ -1,5 +1,11 @@
 # Canonfig skills
 
+- [`sync-harnesses`](sync-harnesses/SKILL.md): start from existing Codex, Claude
+  Code, or other harness settings, migrate reviewed fields into canonical
+  project sources, and project to selected harnesses. Includes Simple/Advanced
+  choices and explicitly approved remote delivery/projection or handoff,
+  including existing followers. No automatic native importer or remote harness
+  command is implied.
 - [`setup-canonfig`](setup-canonfig/SKILL.md): guided setup in Simple or Advanced
   (in-depth) mode. It inspects first, offers numbered choices plus custom input,
   explains each question, recommends safe defaults, then plans and verifies the
@@ -8,6 +14,12 @@
   first-time role establishment.
 - [`operate-canonfig`](operate-canonfig/SKILL.md): evidence-first publication,
   synchronization, scheduling, diagnostics, drift handling, and recovery.
+
+For harness-to-harness work, start with `Use $sync-harnesses in simple mode to
+sync my Codex project configuration to Claude Code and Antigravity`.
+Add selected remote machines explicitly. The skill separates source delivery,
+projection, and runtime verification; follower sync alone does not project
+harness configuration. See its capability boundary before planning automation.
 
 Start with `Use $setup-canonfig in simple mode to set up this machine` or
 `Use $setup-canonfig in advanced mode to review my configuration`.

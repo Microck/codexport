@@ -1,8 +1,14 @@
 # Project harness setup
 
+For migration from an existing native harness (for example Codex to Claude Code)
+or explicitly requested remote harness deployment, use
+[`sync-harnesses`](../../sync-harnesses/SKILL.md). Preserve the selected mode and
+previous answers. That skill distinguishes reviewed native migration, local
+projection, remote delivery, and existing-follower limitations.
+
 Project-local projection is separate from Source/Follower synchronization. Do
 not initialize machine identities, ask fleet questions, or discover Tailscale
-peers for this branch alone.
+peers for this local branch alone.
 
 ## Inspect and offer choices
 

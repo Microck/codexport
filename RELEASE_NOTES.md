@@ -1,18 +1,20 @@
-# Canonfig v3.0.1
+# Canonfig v3.1.0
 
-Canonfig 3.0.1 requires Node.js 24 or newer.
+Canonfig 3.1.0 requires Node.js 24 or newer.
 
-This release changes no behavior. The package contents are identical to v3.0.0
-apart from the version string.
+## Features
 
-## Supply chain
+- Add the opt-in `append-local` file policy for shared instructions such as
+  `AGENTS.md`. Canonfig updates a marked Source section and preserves the
+  follower's local text below it. Removing the resource removes only the Source
+  section. Existing file policies keep their behavior.
+- Add Simple and Advanced setup guidance, numbered configuration choices, and
+  opt-in Tailscale device discovery.
+- Add a harness-to-harness skill for importing supported agent configuration
+  into one canonical harness and projecting it to other supported targets.
 
-- The package is published through npm trusted publishing, so it carries a
-  provenance attestation linking the tarball to the workflow run and commit that
-  built it. Verify it with `npm audit signatures` after installing, or read the
-  provenance on the npm package page.
-- v3.0.0 was published from a local machine after the trusted publisher
-  configuration failed, so it has no attestation. Prefer 3.0.1 when you want a
-  verifiable build. v3.0.0 remains installable and is functionally identical.
+`append-local` supports regular, non-executable UTF-8 text files. Edits to the
+managed Source section are reported as drift. Recovery preserves local edits
+made after a failed apply and retains the snapshots needed for manual recovery.
 
-Full changelog: https://github.com/Microck/canonfig/compare/v3.0.0...v3.0.1
+Full changelog: https://github.com/Microck/canonfig/compare/v3.0.1...v3.1.0

@@ -38,7 +38,7 @@ proposals must show their timezone and remain editable.
 After the displayed stage is approved, install only if necessary:
 
 ```bash
-npm install --global @microck/canonfig@3.0.1
+npm install --global @microck/canonfig@3.1.0
 canonfig --version
 canonfig source init
 canonfig doctor --no-input --timeout-ms 5000

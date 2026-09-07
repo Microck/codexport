@@ -1,6 +1,6 @@
 {
   "name": "@microck/canonfig",
-  "version": "3.0.1",
+  "version": "3.1.0",
   "description": "one-way configuration synchronizer: publish a canonical AI agent setup from one Source Machine and converge Linux, macOS, and Windows Follower Machines",
   "author": "Microck <contact@micr.dev>",
   "license": "MIT",

@@ -1,5 +1,5 @@
 import { mkdtempSync, rmSync } from "node:fs";
-import { access, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, open, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -159,6 +159,46 @@ export const machineStateContract = (
       expect(new TextDecoder().decode(result.content)).toBe("new");
       expect(result.directoryPermissions.mode).toBe(0o700);
       expect(result.filePermissions.mode).toBe(0o600);
+      },
+    );
+
+    it.skipIf(!nativeOperations).each([false, true])(
+      "copies large file sources and rejects corrupt backups before replacement (managed root: %s)",
+      async (managedRoot) => {
+        const root = temporaryDirectory();
+        const source = pathJoin(root, "backup.bin");
+        const handle = await open(source, "wx");
+        try {
+          await handle.truncate(17 * 1024 * 1024);
+        } finally {
+          await handle.close();
+        }
+        await runWith(adapter.localFileLayer(root), Effect.gen(function*() {
+          const machine = yield* MachineState;
+          const directory = yield* machine.normalizePath({ path: pathJoin(root, "managed") });
+          const path = yield* machine.normalizePath({ path: pathJoin(directory.absolute, "target.bin") });
+          const sourcePath = yield* machine.normalizePath({ path: source });
+          const digest = (yield* machine.digestFile({ path: sourcePath })).value;
+          yield* machine.ensureDirectory({ path: directory });
+          const copy = () => managedRoot
+            ? machine.mutateWithinRoot({ root: directory, path, mutation: {
+              kind: "write", content: { file: source, digest }, mode: 0o750,
+            } })
+            : machine.atomicWrite({ path, content: { file: source, digest }, mode: 0o750 });
+          yield* copy();
+          expect((yield* machine.digestFile({ path })).value).toBe(digest);
+          expect((yield* machine.permissions(path)).mode).toBe(0o750);
+          // A changed backup must never replace an otherwise valid target.
+          yield* Effect.promise(() => writeFile(source, "corrupt"));
+          const failure = yield* Effect.flip(copy());
+          expect(failure._tag).toBe("MachineFilesystemError");
+          expect((yield* machine.digestFile({ path })).value).toBe(digest);
+          expect(yield* Effect.promise(() => readdir(directory.absolute))).toEqual(["target.bin"]);
+          yield* machine.removeFile({ path });
+          yield* machine.ensureDirectory({ path });
+          expect((yield* Effect.flip(copy()))._tag).toBe("MachineFilesystemError");
+          expect((yield* machine.inspectPath(path)).kind).toBe("directory");
+        }));
       },
     );
 

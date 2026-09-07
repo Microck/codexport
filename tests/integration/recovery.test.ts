@@ -2,6 +2,7 @@ import {
   chmodSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -88,13 +89,12 @@ interface Fixture {
 }
 
 type TestRollbackPayload =
-  | { readonly path: string; readonly existed: boolean; readonly content: string }
   | { readonly path: string; readonly state: "absent" }
   | { readonly path: string; readonly state: "directory"; readonly mode: number }
   | {
     readonly path: string;
     readonly state: "regular";
-    readonly content: string;
+    readonly content: Uint8Array;
     readonly mode: number;
   }
   | { readonly path: string; readonly state: "symlink"; readonly target: string };
@@ -363,8 +363,9 @@ const rollbackReference = (
 ): string => {
   return writeRollbackPayload(value, action, {
     path: value.target,
-    existed: true,
-    content: Buffer.from(previous).toString("base64"),
+    state: "regular",
+    content: Buffer.from(previous),
+    mode: 0o600,
   });
 };
 
@@ -383,7 +384,13 @@ const writeRollbackPayload = (
     `${sha256Hex(action)}.json`,
   );
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify([payload]));
+  if (payload.state === "regular") {
+    const { content, ...metadata } = payload;
+    writeFileSync(`${path}.${sha256Hex(payload.path)}.bin`, content, { mode: 0o600 });
+    writeFileSync(path, JSON.stringify([{ ...metadata, digest: sha256BytesHex(content) }]));
+  } else {
+    writeFileSync(path, JSON.stringify([payload]));
+  }
   return path;
 };
 
@@ -575,7 +582,7 @@ describe("synchronization crash recovery", () => {
     const reference = writeRollbackPayload(value, first.id, {
       path: value.target,
       state: "regular",
-      content: Buffer.from("previous").toString("base64"),
+      content: Buffer.from("previous"),
       mode: 0o600,
     });
     await journal(value, first.id, "running", reference);
@@ -812,7 +819,7 @@ describe("synchronization crash recovery", () => {
     const reference = writeRollbackPayload(value, action.id, {
       path: value.target,
       state: "regular",
-      content: Buffer.from("previous").toString("base64"),
+      content: Buffer.from("previous"),
       mode: 0o600,
     });
     await journal(value, action.id, "running", reference);
@@ -1094,7 +1101,7 @@ describe("synchronization crash recovery", () => {
           Effect.tap(() =>
             Effect.sync(() => {
               if (input.path.absolute === value.target) {
-                writes.push(Buffer.from(input.content).toString("utf8"));
+                writes.push(readFileSync(value.target, "utf8"));
               }
             })
           ),
@@ -1151,7 +1158,7 @@ describe("synchronization crash recovery", () => {
     const reference = writeRollbackPayload(value, plan.actions[0]!.id, {
       path: value.target,
       state: "regular",
-      content: Buffer.from(value.artifact.content).toString("base64"),
+      content: value.artifact.content,
       mode: 0o600,
     });
 
@@ -1316,7 +1323,7 @@ describe("synchronization crash recovery", () => {
     const reference = writeRollbackPayload(value, removal.id, {
       path: value.target,
       state: "regular",
-      content: Buffer.from(value.artifact.content).toString("base64"),
+      content: value.artifact.content,
       mode: 0o600,
     });
 
@@ -1418,7 +1425,7 @@ describe("synchronization crash recovery", () => {
       (value: Fixture) => ({
         path: value.target,
         state: "regular",
-        content: Buffer.from("regular").toString("base64"),
+        content: Buffer.from("regular"),
         mode: 0o600,
       }),
       (_value: Fixture) => ["write:regular:384", "write:canonical content:384"],
@@ -1428,7 +1435,7 @@ describe("synchronization crash recovery", () => {
       (value: Fixture) => ({
         path: value.target,
         state: "regular",
-        content: Buffer.from("executable").toString("base64"),
+        content: Buffer.from("executable"),
         mode: 0o700,
       }),
       (_value: Fixture) => ["write:executable:448", "write:canonical content:384"],
@@ -1459,12 +1466,11 @@ describe("synchronization crash recovery", () => {
       const machine = decorateMachine(value.root, (service) => ({
         ...service,
         atomicWrite: (input) => {
-          if (input.path.absolute === value.target) {
-            operations.push(
-              `write:${Buffer.from(input.content).toString("utf8")}:${String(input.mode)}`,
-            );
-          }
-          return service.atomicWrite(input);
+          return service.atomicWrite(input).pipe(Effect.tap(() => Effect.sync(() => {
+            if (input.path.absolute === value.target) {
+              operations.push(`write:${readFileSync(value.target, "utf8")}:${String(input.mode)}`);
+            }
+          })));
         },
         removeFile: (input) => {
           if (input.path.absolute === value.target) operations.push("remove");

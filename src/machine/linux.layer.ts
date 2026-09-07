@@ -51,6 +51,7 @@ import {
   ProcessTimeoutError,
 } from "./machine-state.errors.ts";
 import { MachineState } from "./machine-state.service.ts";
+import { writeFileContent } from "./file-content.ts";
 import type {
   AtomicWriteInput,
   CredentialStorageCapability,
@@ -59,6 +60,7 @@ import type {
   EnsureDirectoryInput,
   ExecutableQuery,
   FileDigest,
+  FileContent,
   FilePermissions,
   LinuxMachineStateOptions,
   LoadCredentialInput,
@@ -429,7 +431,7 @@ const syncHandle = (
 
 const atomicWriteFile = (
   path: string,
-  content: Uint8Array,
+  content: FileContent,
   mode: number,
 ): Effect.Effect<void, MachineFilesystemError> =>
   promiseEffect("atomically write file", path, async () => {
@@ -438,7 +440,7 @@ const atomicWriteFile = (
     let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
       handle = await open(temporary, "wx", mode);
-      await handle.writeFile(content);
+      await writeFileContent(handle, content);
       await syncHandle(handle);
       await handle.chmod(mode);
       await handle.close();
@@ -455,7 +457,7 @@ const atomicWriteFile = (
       if (handle !== undefined) await handle.close().catch(() => undefined);
       await rm(temporary, { force: true }).catch(() => undefined);
     }
-  });
+  }).pipe(Effect.uninterruptible);
 
 const descriptorPath = (handle: FileHandle): string =>
   `/proc/self/fd/${handle.fd}`;
@@ -541,20 +543,20 @@ const portableSafeRootMutation = async (
       `.${name}.canonfig-${randomBytes(12).toString("hex")}`,
     );
     try {
-      await prepareManagedLeafKind(target, "non-directory");
       if (input.mutation.kind === "symlink") {
         await symlink(symlinkTarget!, temporary);
       } else {
         const mode = input.mutation.mode ?? defaultFileMode;
         const temporaryHandle = await open(temporary, "wx", mode);
         try {
-          await temporaryHandle.writeFile(input.mutation.content);
+          await writeFileContent(temporaryHandle, input.mutation.content);
           await syncHandle(temporaryHandle);
           await temporaryHandle.chmod(mode);
         } finally {
           await temporaryHandle.close();
         }
       }
+      await prepareManagedLeafKind(target, "non-directory");
       await rename(temporary, target);
       const parentHandle = await open(
         parent,
@@ -691,20 +693,20 @@ const safeRootMutation = (
           `.${name}.canonfig-${randomBytes(12).toString("hex")}`,
         );
         try {
-          await prepareManagedLeafKind(target, "non-directory");
           if (input.mutation.kind === "symlink") {
             await symlink(symlinkTarget!, temporary);
           } else {
             const mode = input.mutation.mode ?? defaultFileMode;
             const temporaryHandle = await open(temporary, "wx", mode);
             try {
-              await temporaryHandle.writeFile(input.mutation.content);
+              await writeFileContent(temporaryHandle, input.mutation.content);
               await syncHandle(temporaryHandle);
               await temporaryHandle.chmod(mode);
             } finally {
               await temporaryHandle.close();
             }
           }
+          await prepareManagedLeafKind(target, "non-directory");
           await rename(temporary, target);
           await syncHandle(parent);
         } finally {
@@ -716,7 +718,7 @@ const safeRootMutation = (
         }
       }
     });
-  });
+  }).pipe(Effect.uninterruptible);
 
 const normalizedInputPath = (
   input: NormalizePathInput,

@@ -33,11 +33,13 @@ import {
   type MachineStateError,
 } from "./machine-state.errors.ts";
 import { MachineState } from "./machine-state.service.ts";
+import { writeFileContent } from "./file-content.ts";
 import { linuxMachineStateLayer } from "./linux.layer.ts";
 import type {
   CredentialPolicy,
   CredentialStorageCapability,
   FilePermissions,
+  FileContent,
   MachinePath,
   NormalizePathInput,
   ProcessEnvironmentEntry,
@@ -627,7 +629,7 @@ export const windowsMachineStateLayer = (
         );
       const secureAtomicWrite = (
         path: string,
-        content: Uint8Array,
+        content: FileContent,
         mode: number,
       ): Effect.Effect<void, MachineStateError> => {
         const parent = win32.dirname(path);
@@ -642,7 +644,7 @@ export const windowsMachineStateLayer = (
               let handle: Awaited<ReturnType<typeof open>> | undefined;
               try {
                 handle = await open(temporary, "wx");
-                await handle.writeFile(content);
+                await writeFileContent(handle, content);
                 await handle.sync().catch((cause: NodeJS.ErrnoException) => {
                   if (cause.code !== "EPERM" && cause.code !== "EINVAL") throw cause;
                 });
@@ -674,6 +676,7 @@ export const windowsMachineStateLayer = (
           Effect.ensuring(Effect.promise(() =>
             rm(temporary, { force: true }).catch(() => undefined)
           )),
+          Effect.uninterruptible,
         );
       };
       const isWithinRoot = (root: string, candidate: string): boolean => {
@@ -751,7 +754,6 @@ export const windowsMachineStateLayer = (
           return true;
         }
         if (mutation.kind === "write") {
-          await prepareWindowsManagedLeafKind(guardedTarget, "non-directory");
           await Effect.runPromise(secureAtomicWrite(
             guardedTarget,
             mutation.content,
@@ -888,7 +890,7 @@ export const windowsMachineStateLayer = (
             catch: (cause) =>
               filesystemFailure("mutate managed path", path, cause),
           });
-        });
+        }).pipe(Effect.uninterruptible);
       const secureStoreAvailable = Effect.promise(() =>
         options.credentialStoreAccess !== "unavailable"
           && process.platform === "win32"

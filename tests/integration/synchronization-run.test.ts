@@ -194,8 +194,8 @@ const fileFixture = (
   root: string,
   run = "run-1",
   observedDigest?: string | undefined,
+  content = new TextEncoder().encode("canonical content"),
 ): Fixture => {
-  const content = new TextEncoder().encode("canonical content");
   const digest = sha256BytesHex(content);
   const target = join(root, "home", "settings.json");
   const resource: PublishedResource = {
@@ -906,10 +906,11 @@ describe("synchronization apply run", () => {
     await expect(Effect.runPromise(restoreRollbackReference(context, prepared.rollbackReference).pipe(Effect.provide(layer))))
       .rejects.toMatchObject({ _tag: "InvalidExecutionPlanError", message: expect.stringContaining("changed after the action") });
     expect(await readFile(context.resource.target)).toEqual(changed);
-    expect(await readFile(prepared.rollbackReference, "utf8")).toContain(Buffer.from("original local\r\n").toString("base64"));
+    expect(await readFile(`${prepared.rollbackReference}.${sha256Hex(context.resource.target)}.bin`, "utf8"))
+      .toBe("original local\r\n");
   });
 
-  it("recovers an append-local snapshot whose base64 encoding exceeds the file limit", async () => {
+  it("recovers append-local text near its parsing limit from a raw backup", async () => {
     const root = temporaryDirectory();
     const base = appendLocalContext(root, "old");
     const context = { ...base, limits: { ...base.limits, maximumFileBytes: 256 } };
@@ -919,7 +920,8 @@ describe("synchronization apply run", () => {
     const layer = machineLayer(root);
     const prepared = await Effect.runPromise(prepareResourceAction(context).pipe(Effect.provide(layer)));
     if (prepared.rollbackReference === undefined) throw new Error("missing text backup");
-    expect((await readFile(prepared.rollbackReference)).byteLength).toBeGreaterThan(256);
+    expect(await readFile(`${prepared.rollbackReference}.${sha256Hex(context.resource.target)}.bin`))
+      .toEqual(Buffer.from(before));
     await Effect.runPromise(prepared.execute.pipe(Effect.provide(layer)));
     await Effect.runPromise(restoreRollbackReference(context, prepared.rollbackReference).pipe(Effect.provide(layer)));
     expect(await readFile(context.resource.target)).toEqual(Buffer.from(before));
@@ -2257,8 +2259,8 @@ if (process.argv.slice(2).some((value) =>
     ]));
   });
 
-  it("removes an entire previously owned resource once and preserves unowned files", async () => {
-    const fixture = fileFixture(temporaryDirectory(), "run-remove-resource-initial");
+  it.each([8, 17 * 1024 * 1024])("removes a %i-byte owned resource once and preserves unowned files", async (size) => {
+    const fixture = fileFixture(temporaryDirectory(), "run-remove-resource-initial", undefined, Buffer.alloc(size, 0x61));
     const unowned = join(dirname(fixture.target), "unowned.txt");
     const first = await seedAndRun(fixture);
     expect(first.outcome).toBe("Converged");
@@ -2286,7 +2288,7 @@ if (process.argv.slice(2).some((value) =>
           resource: fixture.revision.resources[0]!.id,
           observed: {
             state: "present",
-            digest: decode(ContentDigest)(fixture.artifact.digest),
+            digest: fixture.artifact.digest,
             executable: false,
           },
         }],
@@ -2916,22 +2918,23 @@ if (process.argv.slice(2).some((value) =>
     expect(getConfigPath(document, "agent.model")).toBe("review-model");
   });
 
-  it("returns Failed and restores owned content when verification fails", async () => {
+  it.each([8, 17 * 1024 * 1024])("returns Failed and restores %i owned bytes when verification fails", async (size) => {
     const fixture = fileFixture(temporaryDirectory(), "run-verification");
     mkdirSync(dirname(fixture.target), { recursive: true });
-    await writeFile(fixture.target, "original");
+    const original = Buffer.alloc(size, 0x61);
+    await writeFile(fixture.target, original);
+    chmodSync(fixture.target, 0o750);
     const wrongDigest = decode(ContentDigest)("f".repeat(64));
-    const machine = decorateMachine(fixture.root, (service) => ({
-      ...service,
-      digestFile: (input) =>
-        input.path.absolute === fixture.target
-          ? Effect.succeed({ algorithm: "sha256", value: wrongDigest })
-          : service.digestFile(input),
-    }));
-
-    const outcome = await seedAndRun(fixture, machine);
+    const revision: PlanningProfileRevision = {
+      ...fixture.revision,
+      desired: fixture.revision.desired.map((entry) => ({
+        ...entry, verification: { method: "digest", digest: wrongDigest },
+      })),
+    };
+    const outcome = await seedAndRun({ ...fixture, revision, input: { ...fixture.input, revision } });
     expect(outcome.outcome).toBe("Failed");
-    expect(await readFile(fixture.target, "utf8")).toBe("original");
+    expect(sha256BytesHex(await readFile(fixture.target))).toBe(sha256BytesHex(original));
+    expect(statSync(fixture.target).mode & 0o777).toBe(0o750);
     expect(actionRows(fixture.database)[2]?.rollback_reference).toContain(
       "canonfig/rollback",
     );
@@ -3044,11 +3047,11 @@ if (process.argv.slice(2).some((value) =>
     expect(rows[2]?.verification_json).not.toBeNull();
   });
 
-  it("cleans rollback material after a terminal run", async () => {
+  it.each([8, 17 * 1024 * 1024])("cleans rollback material after replacing %i bytes", async (size) => {
     const fixture = fileFixture(temporaryDirectory(), "run-rollback-material");
     mkdirSync(dirname(fixture.target), { recursive: true });
-    await writeFile(fixture.target, "previous");
-    await seedAndRun(fixture);
+    await writeFile(fixture.target, Buffer.alloc(size, 0x61));
+    expect((await seedAndRun(fixture)).outcome).toBe("Converged");
 
     const reference = actionRows(fixture.database)[2]?.rollback_reference;
     expect(reference).toBeTypeOf("string");
@@ -3059,6 +3062,63 @@ if (process.argv.slice(2).some((value) =>
       code: "ENOENT",
     });
   });
+
+  it.each(["valid", "missing", "corrupt"] as const)(
+    "recovers a persisted large-file snapshot with a %s backup",
+    async (backupState) => {
+      const base = fileFixture(temporaryDirectory(), "run-large-recovery");
+      const original = Buffer.alloc(17 * 1024 * 1024, 0x61);
+      await mkdir(dirname(base.target), { recursive: true });
+      await writeFile(base.target, original);
+      chmodSync(base.target, 0o750);
+      const revision: PlanningProfileRevision = {
+        ...base.revision,
+        desired: base.revision.desired.map((entry) => ({
+          ...entry, verification: { method: "digest", digest: decode(ContentDigest)("f".repeat(64)) },
+        })),
+      };
+      const input = { ...base.input, revision };
+      const fixture = { ...base, revision, input };
+      const reference = await Effect.runPromise(Effect.gen(function*() {
+        const repository = yield* StateRepository;
+        yield* repository.registerFollower({ follower });
+        yield* repository.publishRevision({ revision });
+        yield* repository.startRun({ id: input.id, follower: follower.id, revision: revision.id,
+          plan: input.plan, startedAt: "2026-09-07T00:00:00Z" });
+        const states = yield* executionContexts(input, defaultSynchronizationExecutionLimits);
+        const state = states.find((entry) => entry.action.kind === "write-file");
+        if (state?.context === undefined) throw new Error("missing file execution context");
+        const prepared = yield* prepareResourceAction(state.context);
+        yield* repository.journalAction({ run: input.id, action: state.action.id,
+          state: "running", recordedAt: "2026-09-07T00:00:01Z", attempt: 1,
+          rollbackReference: prepared.rollbackReference });
+        yield* prepared.execute;
+        if (prepared.rollbackReference === undefined) throw new Error("missing rollback reference");
+        return prepared.rollbackReference;
+      }).pipe(Effect.provide(applicationLayer(fixture))));
+      const backup = `${reference}.${sha256Hex(base.target)}.bin`;
+      expect(statSync(reference).size).toBeLessThan(1024);
+      expect(statSync(backup).size).toBe(original.length);
+      expect(statSync(backup).mode & 0o777).toBe(0o600);
+      if (backupState === "missing") rmSync(backup);
+      if (backupState === "corrupt") await writeFile(backup, "corrupt");
+      // Reopen the database and filesystem services; no in-memory rollback closure survives.
+      const recovery = Effect.runPromise(Effect.flatMap(Synchronization, (synchronization) =>
+        synchronization.recover({ follower: follower.id, revision, artifacts: input.artifacts })
+      ).pipe(Effect.provide(applicationLayer(fixture))));
+      if (backupState === "valid") {
+        expect((await recovery).outcome).toBe("Failed");
+        expect(sha256BytesHex(await readFile(base.target))).toBe(sha256BytesHex(original));
+        expect(statSync(base.target).mode & 0o777).toBe(0o750);
+        await expect(access(dirname(reference))).rejects.toMatchObject({ code: "ENOENT" });
+      } else {
+        await expect(recovery).rejects.toMatchObject({ _tag: "RecoveryIntegrityError" });
+        expect(await readFile(base.target, "utf8")).toBe("canonical content");
+        await access(reference);
+        if (backupState === "corrupt") expect(await readFile(backup, "utf8")).toBe("corrupt");
+      }
+    },
+  );
 
   it.each(["run", "recover"] as const)("retains only failed rollback snapshots during %s", async (operation) => {
     for (const textState of ["no-op", "restored", "edited"] as const) {
@@ -3140,7 +3200,7 @@ if (process.argv.slice(2).some((value) =>
       if (textAction === undefined) throw new Error("missing text action");
       for (const reference of references) {
         if (textState === "edited" && reference.endsWith(`${sha256Hex(textAction.id)}.json`)) {
-          expect(await readFile(reference, "utf8")).toContain(Buffer.from("local\n").toString("base64"));
+          expect(await readFile(`${reference}.${sha256Hex(base.target)}.bin`, "utf8")).toBe("local\n");
         } else {
           await expect(access(reference)).rejects.toMatchObject({ code: "ENOENT" });
         }

@@ -113,10 +113,18 @@ export const cleanupRollbackSnapshots = (
       base: directories.cache,
     });
     const retained = new Set(failedRollbacks);
-    const references = [...new Set(actions)].filter((action) => !retained.has(action)).flatMap((action) => [
-      `${sha256Hex(action)}.json`,
-      `${sha256Hex(action)}.schedule.json`,
+    const disposable = new Set<string>(actions.filter((action) => !retained.has(action)).map(sha256Hex));
+    const references = [...disposable].flatMap((action) => [
+      `${action}.json`,
+      `${action}.schedule.json`,
     ]);
+    const entries = yield* machine.listDirectory(directory);
+    for (const entry of entries) {
+      const ownedBackup = /^([a-f0-9]{64})\.json\.[a-f0-9]{64}\.bin$/u.exec(entry.path);
+      if (ownedBackup?.[1] !== undefined && disposable.has(ownedBackup[1])) {
+        references.push(entry.path);
+      }
+    }
     for (const reference of references) {
       const path = yield* machine.normalizePath({
         path: reference,

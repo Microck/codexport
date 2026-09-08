@@ -723,10 +723,12 @@ describe("resource and Apply Policy coverage", () => {
           target: subject.target,
         }],
       }));
-      expect(plan.actions.some((action) =>
-        action.kind === "write-file" || action.kind === "mirror-directory"
-      )).toBe(true);
-      expect(plan.actions.some((action) => action.kind === "human-action")).toBe(false);
+      expect(plan.actions.map((action) => action.kind)).toEqual([
+        kind === "skill" ? "mirror-directory" : "write-file",
+      ]);
+      expect(plan.actions[0]?.detail).toMatchObject(kind === "skill"
+        ? { kind: "mirror-directory", target: subject.target, adds: ["SKILL.md"], removes: [] }
+        : { kind: "write-file", target: subject.target, digest: digestA });
     },
   );
 

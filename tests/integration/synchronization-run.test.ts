@@ -52,6 +52,7 @@ import type {
 import { MachineState } from "../../src/machine/machine-state.service.ts";
 import {
   canonicalJson,
+  directoryEntriesDigest,
   directoryVerificationDigest,
   sha256BytesHex,
   sha256Hex,
@@ -1927,6 +1928,83 @@ if (process.argv.slice(2).some((value) =>
       code: "ENOENT",
     });
   });
+
+  it.each(["SKILL.md", "references/guide.md"])(
+    "recreates a missing managed skill directory containing %s",
+    async (relativePath) => {
+      const root = temporaryDirectory();
+      const base = fileFixture(root, "run-skill-initial");
+      const target = join(root, "managed-skill");
+      const resource: PublishedResource = {
+        id: decode(ResourceId)("managed-skill"),
+        kind: "skill",
+        policy: "replace-if-unmodified",
+        target,
+        dependsOn: [],
+        blobs: [],
+      };
+      const files = [{
+        path: relativePath,
+        digest: base.artifact.digest,
+        executable: false,
+        mode: 0o600,
+      }];
+      const desired: DesiredResource = {
+        kind: "skill",
+        digest: directoryEntriesDigest(files.map(file => ({ ...file, objectKind: "regular" as const }))),
+        mode: 0o700,
+        directories: [],
+        files,
+      };
+      const revision: PlanningProfileRevision = {
+        ...base.revision,
+        resources: [resource],
+        desired: [{
+          resource: resource.id,
+          desired,
+          verification: { method: "digest", digest: directoryVerificationDigest(files) },
+        }],
+      };
+      const input = {
+        revision,
+        follower: follower.id,
+        observedState: {
+          platform: "linux" as const,
+          resources: [{ resource: resource.id, observed: { state: "absent" as const } }],
+          availableBlobs: [],
+        },
+        localOverlay: [],
+        appliedResources: [],
+      };
+      const fixture: Fixture = {
+        ...base,
+        target,
+        revision,
+        input: { ...base.input, revision, plan: Effect.runSync(planSynchronization(input)) },
+      };
+      expect((await seedAndRun(fixture)).outcome).toBe("Converged");
+      const applied = await Effect.runPromise(
+        Effect.flatMap(StateRepository, repository => repository.loadAppliedResources(follower.id))
+          .pipe(Effect.provide(stateRepositoryLayer(base.database))),
+      );
+      renameSync(target, join(root, "removed-skill"));
+
+      const plan = Effect.runSync(planSynchronization({ ...input, appliedResources: applied }));
+      const recreated = await seedAndRun({
+        ...fixture,
+        input: {
+          ...fixture.input,
+          id: decode(RunId)("run-skill-recreated"),
+          plan,
+          appliedResources: applied,
+        },
+      });
+      expect(recreated.outcome).toBe("Converged");
+      expect(statSync(target).isDirectory()).toBe(true);
+      expect(statSync(target).mode & 0o7777).toBe(0o700);
+      expect(await readFile(join(target, relativePath), "utf8")).toBe("canonical content");
+    },
+  );
 
   it("rolls back a newly-created directory root to missing", async () => {
     const root = temporaryDirectory();

@@ -99,7 +99,9 @@ cannot install anything.
 
 Under `replace-if-unmodified`, a missing target is reinstalled: absence is not a
 local edit, so there is nothing to overwrite. A target that exists but cannot be
-verified is reported rather than overwritten.
+verified is reported rather than overwritten. A missing skill root is recreated
+as a directory containing its declared files, even when Canonfig previously
+managed that root. Its tree digest is not a file-content artifact.
 
 Every Profile Resource has a unique ID, kind, target, kind-specific
 specification, verification contract, optional groups, and optional

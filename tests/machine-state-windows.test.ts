@@ -75,7 +75,12 @@ describe.skipIf(process.platform !== "win32")("Windows file permission ownership
     const inspectAcl = async (path: string) => {
       const output = await promisify(execFile)(powershell, [
         "-NoProfile", "-NonInteractive", "-Command",
-        "(Get-Acl -LiteralPath $env:CANONFIG_TEST_PATH).Sddl",
+        // Use .NET directly: PowerShell 7 launchers can pass a module search
+        // path that prevents Windows PowerShell from loading Get-Acl.
+        "$acl = if ([System.IO.Directory]::Exists($env:CANONFIG_TEST_PATH)) { "
+          + "[System.IO.Directory]::GetAccessControl($env:CANONFIG_TEST_PATH) "
+          + "} else { [System.IO.File]::GetAccessControl($env:CANONFIG_TEST_PATH) }; "
+          + "$acl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::All)",
       ], { env: { ...process.env, CANONFIG_TEST_PATH: path } });
       return output.stdout.trim();
     };

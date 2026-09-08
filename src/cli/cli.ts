@@ -42,7 +42,7 @@ import {
 
 export const programName = "canonfig";
 export const programDisplayName = "Canonfig";
-export const programVersion = "3.1.4";
+export const programVersion = "3.1.5";
 
 export const helpText = `${programDisplayName} ${programVersion}
 

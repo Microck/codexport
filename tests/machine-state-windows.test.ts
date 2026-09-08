@@ -92,6 +92,22 @@ describe.skipIf(process.platform !== "win32")("Windows file permission ownership
         await writeFile(source, "file-source content");
         const parentAcl = await inspectAcl(root);
         const siblingAcl = await inspectAcl(sibling);
+        if (parents.length > 0) {
+          const failingAclEnvironment = Object.entries(process.env).flatMap(([name, value]) =>
+            value === undefined || name === "CANONFIG_ICACLS" ? [] : [{ name, value }]
+          );
+          failingAclEnvironment.push({
+            name: "CANONFIG_ICACLS", value: join(root, "missing-icacls.exe"),
+          });
+          await expect(Effect.runPromise(Effect.gen(function*() {
+            const machine = yield* MachineState;
+            const path = yield* machine.normalizePath({ path: target });
+            yield* machine.atomicWrite({ path, content: Buffer.from("must not be written") });
+          }).pipe(Effect.provide(windowsMachineStateLayer({
+            environment: failingAclEnvironment,
+          }))))).rejects.toThrow();
+          expect((await readdir(root)).sort()).toEqual(["source.txt", "unmanaged.txt"]);
+        }
         await Effect.runPromise(Effect.gen(function*() {
           const machine = yield* MachineState;
           const path = yield* machine.normalizePath({ path: target });

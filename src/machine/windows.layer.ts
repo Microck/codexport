@@ -643,7 +643,22 @@ export const windowsMachineStateLayer = (
           });
           // mkdir reports the first directory it created. Its inheritable ACL
           // protects the new subtree without changing the existing ancestor.
-          if (createdParent !== undefined) yield* setPrivateAcl(createdParent, true);
+          if (createdParent !== undefined) {
+            yield* setPrivateAcl(createdParent, true).pipe(
+              Effect.tapError(() => Effect.tryPromise({
+                try: async () => {
+                  // Remove only empty directories created by this call, so a
+                  // retry cannot mistake an unprotected tree for an existing one.
+                  for (let directory = parent;; directory = win32.dirname(directory)) {
+                    await rmdir(directory);
+                    if (directory === createdParent) break;
+                  }
+                },
+                catch: (cause) =>
+                  filesystemFailure("remove unprotected Windows parent", createdParent, cause),
+              })),
+            );
+          }
           const staging = yield* Effect.tryPromise({
             try: () => mkdtemp(win32.join(parent, ".canonfig-write-")),
             catch: (cause) => filesystemFailure("stage Windows file", path, cause),

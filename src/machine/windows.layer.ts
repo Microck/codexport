@@ -1356,11 +1356,13 @@ export const windowsMachineStateLayer = (
             }
             const name = createHash("sha256").update(input.name).digest("hex");
             const path = win32.join(localCredentialRoot, `${name}.credential`);
-            return secureAtomicWrite(
-              path,
-              new TextEncoder().encode(Redacted.value(input.value)),
-              0o600,
-            ).pipe(
+            // Credential storage owns this directory; ordinary file writes do not.
+            return secureDirectory(localCredentialRoot, 0o700).pipe(
+              Effect.andThen(secureAtomicWrite(
+                path,
+                new TextEncoder().encode(Redacted.value(input.value)),
+                0o600,
+              )),
               Effect.as(decode(CredentialReference)(`local-file:${path}`)),
             );
           }

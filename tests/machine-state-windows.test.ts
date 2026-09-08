@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { win32 } from "node:path";
 
 import { describe, expect, it } from "vitest";
-import { Effect } from "effect";
+import { Effect, Redacted } from "effect";
 import { MachineState } from "../src/machine/machine-state.service.ts";
 
 import {
@@ -65,25 +65,26 @@ const environment = (root: string) => {
 };
 
 describe.skipIf(process.platform !== "win32")("Windows file permission ownership", () => {
+  const inspectAcl = async (path: string) => {
+    const powershell = join(process.env.SystemRoot ?? "C:\\Windows",
+      "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const output = await promisify(execFile)(powershell, [
+      "-NoProfile", "-NonInteractive", "-Command",
+      // Use .NET directly: PowerShell 7 launchers can pass a module search
+      // path that prevents Windows PowerShell from loading Get-Acl.
+      "$acl = if ([System.IO.Directory]::Exists($env:CANONFIG_TEST_PATH)) { "
+        + "[System.IO.Directory]::GetAccessControl($env:CANONFIG_TEST_PATH) "
+        + "} else { [System.IO.File]::GetAccessControl($env:CANONFIG_TEST_PATH) }; "
+        + "$acl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::All)",
+    ], { env: { ...process.env, CANONFIG_TEST_PATH: path } });
+    return output.stdout.trim();
+  };
+
   it("preserves parent and sibling ACLs when publishing private file content", async () => {
     const root = await mkdtemp(join(tmpdir(), "canonfig-file-permissions-"));
     const target = join(root, "settings.json");
     const sibling = join(root, "unmanaged.txt");
     const source = join(root, "source.txt");
-    const powershell = join(process.env.SystemRoot ?? "C:\\Windows",
-      "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-    const inspectAcl = async (path: string) => {
-      const output = await promisify(execFile)(powershell, [
-        "-NoProfile", "-NonInteractive", "-Command",
-        // Use .NET directly: PowerShell 7 launchers can pass a module search
-        // path that prevents Windows PowerShell from loading Get-Acl.
-        "$acl = if ([System.IO.Directory]::Exists($env:CANONFIG_TEST_PATH)) { "
-          + "[System.IO.Directory]::GetAccessControl($env:CANONFIG_TEST_PATH) "
-          + "} else { [System.IO.File]::GetAccessControl($env:CANONFIG_TEST_PATH) }; "
-          + "$acl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::All)",
-      ], { env: { ...process.env, CANONFIG_TEST_PATH: path } });
-      return output.stdout.trim();
-    };
     try {
       await writeFile(sibling, "keep sibling");
       await writeFile(source, "file-source content");
@@ -107,6 +108,33 @@ describe.skipIf(process.platform !== "win32")("Windows file permission ownership
       // Protected DACLs do not regain inherited broad access on publication.
       expect(targetAcl).toContain("D:P");
       expect(targetAcl).not.toMatch(/;;;(?:WD|AU|BU)\)/u);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("protects a new local credential directory without changing its parent", async () => {
+    const root = await mkdtemp(join(tmpdir(), "canonfig-credential-permissions-"));
+    const credentials = join(root, "credentials");
+    try {
+      const parentAcl = await inspectAcl(root);
+      const reference = await Effect.runPromise(Effect.gen(function*() {
+        const machine = yield* MachineState;
+        return yield* machine.storeCredential({
+          name: "acl-fixture",
+          value: Redacted.make("public test fixture"),
+        });
+      }).pipe(Effect.provide(windowsMachineStateLayer({
+        credentialPolicy: { kind: "local-file", path: credentials },
+      }))));
+      const credentialPath = String(reference).slice("local-file:".length);
+      expect(await readFile(credentialPath, "utf8")).toBe("public test fixture");
+      for (const path of [credentials, credentialPath]) {
+        const acl = await inspectAcl(path);
+        expect(acl).toContain("D:P");
+        expect(acl).not.toMatch(/;;;(?:WD|AU|BU)\)/u);
+      }
+      expect(await inspectAcl(root)).toBe(parentAcl);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

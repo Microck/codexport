@@ -100,6 +100,7 @@ export class MachineState extends Context.Service<MachineState, {
   ) => Effect.Effect<FileDigest, MachineStateError>;
   readonly credentialCapability: (
   ) => Effect.Effect<CredentialStorageCapability, MachineStateError>;
+  /** Local-file storage owns and restricts its credential directory before writing. */
   readonly storeCredential: (
     input: StoreCredentialInput,
   ) => Effect.Effect<CredentialReference, MachineStateError>;

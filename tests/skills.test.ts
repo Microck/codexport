@@ -44,7 +44,7 @@ describe("Canonfig skill platform scenarios", () => {
       credentialProvider: "Secret Service",
       scheduler: "systemd user timer",
       recipe: "apt",
-      install: "npm install --global @microck/canonfig@3.1.2",
+      install: "npm install --global @microck/canonfig@3.1.3",
     },
     {
       platform: "macOS",
@@ -52,7 +52,7 @@ describe("Canonfig skill platform scenarios", () => {
       credentialProvider: "Keychain",
       scheduler: "launchd user agent",
       recipe: "Homebrew",
-      install: "npm install --global @microck/canonfig@3.1.2",
+      install: "npm install --global @microck/canonfig@3.1.3",
     },
     {
       platform: "Windows",
@@ -60,14 +60,14 @@ describe("Canonfig skill platform scenarios", () => {
       credentialProvider: "Credential Manager",
       scheduler: "per-user Task Scheduler",
       recipe: "winget",
-      install: "npm install --global @microck/canonfig@3.1.2",
+      install: "npm install --global @microck/canonfig@3.1.3",
     },
   ])(
     "installs and operates safely on $platform",
     ({ reference, credentialProvider, scheduler, recipe, install }) => {
       const branch = readProjectFile(reference);
       expect(branch).toContain("Node.js 24");
-      expect(branch).toContain("@microck/canonfig@3.1.2");
+      expect(branch).toContain("@microck/canonfig@3.1.3");
       expect(branch).toContain(install);
       expect(branch).toContain(credentialProvider);
       expect(branch).toContain(scheduler);

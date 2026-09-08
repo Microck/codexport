@@ -154,7 +154,7 @@ const validatePackageMetadata = (metadataPath: string): void => {
   const metadata = Schema.decodeUnknownSync(PackageMetadata)(
     JSON.parse(readFileSync(metadataPath, "utf8")),
   );
-  if (metadata.name !== "@microck/canonfig" || metadata.version !== "3.1.2") {
+  if (metadata.name !== "@microck/canonfig" || metadata.version !== "3.1.3") {
     fail(`unexpected package identity: ${metadata.name}@${metadata.version}`);
   }
   if (metadata.license !== "MIT") fail(`unexpected package license: ${metadata.license}`);
@@ -190,7 +190,7 @@ const validatePackageMetadata = (metadataPath: string): void => {
 const validatePackageContents = (
   artifact: typeof PackedArtifact.Type,
 ): void => {
-  if (artifact.name !== "@microck/canonfig" || artifact.version !== "3.1.2") {
+  if (artifact.name !== "@microck/canonfig" || artifact.version !== "3.1.3") {
     fail(`unexpected packed identity: ${artifact.name}@${artifact.version}`);
   }
   if (artifact.size > 225_000 || artifact.unpackedSize > 1_125_000) {
@@ -248,7 +248,7 @@ const validateBinary = (executable: string): void => {
 
   const version = invokeExecutable(executable, ["--version"]);
   requireSuccess("packed executable version", version);
-  if (version.stdout !== "3.1.2\n" || version.stderr !== "") {
+  if (version.stdout !== "3.1.3\n" || version.stderr !== "") {
     fail("packed executable version output is invalid");
   }
 

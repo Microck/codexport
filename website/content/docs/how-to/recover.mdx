@@ -21,6 +21,10 @@ canonfig recover
 
 Recovery uses the persisted action journal; it does not guess from partial filesystem changes. If there is no recoverable run, the command returns a usage error rather than inventing work.
 
+Before changing an existing file or managed directory, Canonfig captures its permissions in the rollback journal. Rollback restores POSIX modes on Linux and macOS. On Windows it also restores the owner, group, and discretionary access rules, including inheritance flags. It does not capture Windows audit rules. Directory permissions are restored after their children so restrictive permissions do not block recovery.
+
+If Windows refuses to restore a captured owner or access rule, recovery remains failed and retains the journal and backups. Resolve the reported permission error before retrying recovery. A numeric mode alone is not a complete Windows permission backup.
+
 ## Resolve Follower Drift
 
 For every managed skill file, Canonfig compares three digests: target, desired, and last-applied.

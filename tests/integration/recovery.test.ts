@@ -385,9 +385,14 @@ const writeRollbackPayload = (
   );
   mkdirSync(dirname(path), { recursive: true });
   if (payload.state === "regular") {
-    const { content, ...metadata } = payload;
+    const { content, mode, ...metadata } = payload;
     writeFileSync(`${path}.${sha256Hex(payload.path)}.bin`, content, { mode: 0o600 });
-    writeFileSync(path, JSON.stringify([{ ...metadata, digest: sha256BytesHex(content) }]));
+    writeFileSync(path, JSON.stringify([{
+      ...metadata, digest: sha256BytesHex(content), permissions: { platform: "posix", mode },
+    }]));
+  } else if (payload.state === "directory") {
+    const { mode, ...metadata } = payload;
+    writeFileSync(path, JSON.stringify([{ ...metadata, permissions: { platform: "posix", mode } }]));
   } else {
     writeFileSync(path, JSON.stringify([payload]));
   }
@@ -1468,7 +1473,7 @@ describe("synchronization crash recovery", () => {
         atomicWrite: (input) => {
           return service.atomicWrite(input).pipe(Effect.tap(() => Effect.sync(() => {
             if (input.path.absolute === value.target) {
-              operations.push(`write:${readFileSync(value.target, "utf8")}:${String(input.mode)}`);
+              operations.push(`write:${readFileSync(value.target, "utf8")}:${String(input.permissions?.mode ?? input.mode)}`);
             }
           })));
         },

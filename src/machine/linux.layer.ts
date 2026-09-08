@@ -533,8 +533,9 @@ const portableSafeRootMutation = async (
 
     if (input.mutation.kind === "directory") {
       await prepareManagedLeafKind(target, "directory");
-      await mkdir(target, { recursive: true, mode: input.mutation.mode });
-      await chmod(target, input.mutation.mode);
+      const mode = input.mutation.permissions === undefined ? input.mutation.mode : input.mutation.permissions.mode;
+      await mkdir(target, { recursive: true, mode });
+      await chmod(target, mode);
       return;
     }
 
@@ -546,7 +547,7 @@ const portableSafeRootMutation = async (
       if (input.mutation.kind === "symlink") {
         await symlink(symlinkTarget!, temporary);
       } else {
-        const mode = input.mutation.mode ?? defaultFileMode;
+        const mode = input.mutation.permissions?.mode ?? input.mutation.mode ?? defaultFileMode;
         const temporaryHandle = await open(temporary, "wx", mode);
         try {
           await writeFileContent(temporaryHandle, relocateFileContent(input.mutation.content, root, heldRoot));
@@ -682,8 +683,9 @@ const safeRootMutation = (
 
         if (input.mutation.kind === "directory") {
           await prepareManagedLeafKind(target, "directory");
-          await mkdir(target, { recursive: true, mode: input.mutation.mode });
-          await chmod(target, input.mutation.mode);
+          const mode = input.mutation.permissions === undefined ? input.mutation.mode : input.mutation.permissions.mode;
+          await mkdir(target, { recursive: true, mode });
+          await chmod(target, mode);
           await syncHandle(parent);
           return;
         }
@@ -696,7 +698,7 @@ const safeRootMutation = (
           if (input.mutation.kind === "symlink") {
             await symlink(symlinkTarget!, temporary);
           } else {
-            const mode = input.mutation.mode ?? defaultFileMode;
+            const mode = input.mutation.permissions?.mode ?? input.mutation.mode ?? defaultFileMode;
             const temporaryHandle = await open(temporary, "wx", mode);
             try {
               await writeFileContent(temporaryHandle, input.mutation.content);
@@ -1389,7 +1391,7 @@ export const linuxMachineStateLayer = (
       const atomicWrite = Effect.fn("MachineState.atomicWrite")(
         function*(input: AtomicWriteInput): Effect.fn.Return<void, MachineStateError> {
           const path = yield* checkLinuxPath(input.path);
-          yield* atomicWriteFile(path, input.content, input.mode ?? defaultFileMode);
+          yield* atomicWriteFile(path, input.content, input.permissions?.mode ?? input.mode ?? defaultFileMode);
         },
       );
 
@@ -1572,7 +1574,8 @@ export const linuxMachineStateLayer = (
       const setPermissions = Effect.fn("MachineState.setPermissions")(
         function*(input: SetPermissionsInput): Effect.fn.Return<void, MachineStateError> {
           const path = yield* checkLinuxPath(input.path);
-          yield* promiseEffect("set permissions", path, () => chmod(path, input.mode));
+          const mode = input.permissions === undefined ? input.mode : input.permissions.mode;
+          yield* promiseEffect("set permissions", path, () => chmod(path, mode));
         },
       );
 
@@ -1749,6 +1752,9 @@ export const linuxMachineStateLayer = (
         listDirectory,
         setPermissions,
         permissions,
+        snapshotPermissions: Effect.fn("MachineState.snapshotPermissions")((path: MachinePath) =>
+          permissions(path).pipe(Effect.map(({ mode }) => ({ platform: "posix" as const, mode })))
+        ),
         findExecutable,
         runProcess: Effect.fn("MachineState.runProcess")(
           (invocation: ProcessInvocation) =>

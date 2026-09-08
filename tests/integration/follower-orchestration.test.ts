@@ -3,7 +3,7 @@ import {
   sign,
 } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -29,6 +29,7 @@ import {
 import type {
   MachineProfile,
   ProfileRevision,
+  VerificationInput,
 } from "../../src/domain/profile.ts";
 import { EnrollmentLive } from "../../src/enrollment/enrollment.layer.ts";
 import { Enrollment } from "../../src/enrollment/enrollment.service.ts";
@@ -111,6 +112,97 @@ const directoryDigest = (
 }))));
 
 describe("production follower orchestration", () => {
+  it("observes the installed tool independently of its verifier runtime without running commands", async () => {
+    const root = mkdtempSync(join(tmpdir(), "canonfig-tool-observation-"));
+    directories.push(root);
+    const followerRoot = join(root, "follower");
+    const followerDatabase = join(root, "follower.sqlite");
+    const bin = join(followerRoot, "bin");
+    const entry = join(followerRoot, "tool-entry.js");
+    const verifierMarker = join(root, "verifier-ran");
+    await mkdir(bin, { recursive: true });
+    await writeFile(entry, "export {};\n");
+    await writeFile(join(bin, "installed-tool"), "#!/bin/sh\nexit 0\n");
+    await chmod(join(bin, "installed-tool"), 0o700);
+    const commandVerification: VerificationInput = {
+      method: "command",
+      command: [process.execPath, "-e", `require('node:fs').writeFileSync(${JSON.stringify(verifierMarker)}, 'ran')`],
+    };
+    const cases: ReadonlyArray<{
+      id: string; target: string; verify: VerificationInput; expected: string;
+    }> = [
+      { id: "missing-entry", target: join(followerRoot, "missing.js"), verify: commandVerification, expected: "install-tool" },
+      { id: "present-entry", target: entry, verify: commandVerification, expected: "no-op" },
+      { id: "missing-command", target: "missing-tool", verify: commandVerification, expected: "install-tool" },
+      { id: "present-command", target: "installed-tool", verify: commandVerification, expected: "no-op" },
+      { id: "explicit-executable", target: "logical-target", verify: { method: "executable-present", executable: "installed-tool" }, expected: "no-op" },
+    ];
+    const sourceLayer = EnrollmentLive.pipe(
+      Layer.provideMerge(stateRepositoryLayer(join(root, "source.sqlite"))),
+      Layer.provideMerge(machineLayer(join(root, "source"))),
+    );
+    const sourceRuntime = ManagedRuntime.make(sourceLayer);
+    runtimes.push(sourceRuntime);
+    const profileId = decode(ProfileId)("tool-observation");
+    await sourceRuntime.runPromise(Effect.gen(function*() {
+      const source = yield* (yield* Enrollment).initializeSource();
+      const privateKey = createPrivateKey(Redacted.value(yield* (yield* MachineState).loadCredential({ reference: source.signingKeyReference })));
+      const profile: MachineProfile = {
+        id: profileId, version: 2, name: "Tool observation", groups: [],
+        resources: cases.map(({ id, target, verify }) => ({
+          id, target, verify, kind: "tool", policy: "ensure", dependsOn: [],
+          spec: {
+            kind: "tool", toolId: id,
+            recipes: [{ platform: "linux", method: "npm", package: id, version: "1.0.0" }],
+          },
+        })),
+      };
+      const canonicalBytes = canonicalJson(asJson(profile));
+      const digest = sha256Hex(canonicalBytes);
+      const unsigned = {
+        id: decode(ProfileRevisionId)(`${profileId}:${digest}`), profileId, sequence: 1,
+        canonicalBytes, digest, publishedAt: "2026-09-08T00:00:00Z",
+        groups: [], signingKeyId: source.source.keyId,
+        resources: profile.resources.map((resource) => ({
+          id: decode(ResourceId)(resource.id), kind: resource.kind, policy: resource.policy ?? "ensure",
+          target: resource.target, dependsOn: [], blobs: [decode(BlobId)(digestOf(asJson(resource.spec)))],
+        })),
+      };
+      yield* (yield* StateRepository).publishRevision({
+        revision: { ...unsigned, signature: decode(SourceSignature)(`ed25519:${sign(null, Buffer.from(revisionSigningPayload(unsigned)), privateKey).toString("base64url")}`) },
+      });
+    }));
+    const server = await sourceRuntime.runPromise(startSourceServer().pipe(Effect.provide(sourceLayer)));
+    servers.push(server);
+    const invitation = await sourceRuntime.runPromise(Effect.flatMap(Enrollment, (enrollment) => enrollment.createInvitation({
+      endpoint: server.endpoint, expiresInMilliseconds: 60_000,
+    })));
+    const followerMachine = machineLayer(followerRoot);
+    const enrolled = await Effect.runPromise(enrollFollower({ invitation, followerName: "Tool follower" }).pipe(Effect.provide(followerMachine)));
+    const followerRepository = stateRepositoryLayer(followerDatabase);
+    await Effect.runPromise(Effect.flatMap(StateRepository, (repository) => repository.saveFollowerSynchronizationConfiguration({
+      sourceIdentity: enrolled.source,
+      configuration: {
+        schemaVersion: 1, follower: { ...enrolled.follower, credentialReference: enrolled.credentialReference },
+        selectedProfile: profileId,
+        source: { endpoint: server.endpoint, tlsFingerprint: enrolled.tlsFingerprint, signingFingerprint: enrolled.source.publicKeyFingerprint },
+        credentialReference: enrolled.credentialReference,
+        cacheDirectory: join(root, "cache"), stateLocation: followerDatabase,
+        agentPolicy: "deterministic-only", scheduledInvocation: defaultScheduledInvocation, updatedAt: "2026-09-08T00:00:00Z",
+      },
+    })).pipe(Effect.provide(followerRepository)));
+    const application = Layer.mergeAll(followerRepository, followerMachine, AgentResolutionLive,
+      SynchronizationLive.pipe(Layer.provide(Layer.merge(followerRepository, followerMachine))));
+    const planned = await Effect.runPromise(synchronizeFollower(followerDatabase, "plan").pipe(Effect.provide(application)));
+    for (const testCase of cases) {
+      expect(planned.plan.actions.filter((action) => action.resource === testCase.id)).toEqual([
+        expect.objectContaining({ kind: testCase.expected }),
+      ]);
+    }
+    await expect(readFile(verifierMarker)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(join(followerRoot, "missing.js"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("keeps follower text across adoption, local edits, Source replacement, and removal", async () => {
     const root = mkdtempSync(join(tmpdir(), "canonfig-text-orchestration-"));
     directories.push(root);

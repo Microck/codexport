@@ -1,4 +1,4 @@
-import type { Effect, Redacted } from "effect";
+import { type Effect, type Redacted, Schema } from "effect";
 
 import type {
   ContentDigest,
@@ -36,11 +36,27 @@ export type FileContent = Uint8Array | {
   readonly digest: ContentDigest;
 };
 
-export interface AtomicWriteInput {
+/** Persisted rollback permissions, distinct from the desired portable mode. */
+export const FilePermissionSnapshot = Schema.Union([
+  Schema.Struct({ platform: Schema.Literal("posix"), mode: Schema.Int }),
+  Schema.Struct({
+    platform: Schema.Literal("windows"),
+    mode: Schema.Int,
+    /** Owner, group and DACL, including inheritance flags. Audit rules are not captured. */
+    securityDescriptor: Schema.NonEmptyString,
+  }),
+]);
+export type FilePermissionSnapshot = typeof FilePermissionSnapshot.Type;
+
+/** A managed mode and a captured rollback snapshot are mutually exclusive. */
+export type FilePermissionPolicy =
+  | { readonly mode?: number | undefined; readonly permissions?: never }
+  | { readonly mode?: never; readonly permissions: FilePermissionSnapshot };
+
+export type AtomicWriteInput = {
   readonly path: MachinePath;
   readonly content: FileContent;
-  readonly mode?: number | undefined;
-}
+} & FilePermissionPolicy;
 
 export interface ReadFileInput {
   readonly path: MachinePath;
@@ -61,21 +77,22 @@ export interface ValidatePathWithinRootInput {
 }
 
 export type SafeRootMutation =
-  | {
+  | ({
     readonly kind: "write";
     readonly content: FileContent;
-    readonly mode?: number | undefined;
-  }
+  } & FilePermissionPolicy)
   | { readonly kind: "remove" }
   | {
     readonly kind: "symlink";
     /** Preserve the authored link text so relative targets stay relative. */
     readonly target: string;
   }
-  | {
+  | ({
     readonly kind: "directory";
-    readonly mode: number;
-  };
+  } & (
+    | { readonly mode: number; readonly permissions?: never }
+    | { readonly mode?: never; readonly permissions: FilePermissionSnapshot }
+  ));
 
 export interface SafeRootMutationInput {
   readonly root: MachinePath;
@@ -113,10 +130,12 @@ export interface MachineDirectoryEntry {
   readonly kind: MachineObjectKind;
 }
 
-export interface SetPermissionsInput {
+export type SetPermissionsInput = {
   readonly path: MachinePath;
-  readonly mode: number;
-}
+} & (
+  | { readonly mode: number; readonly permissions?: never }
+  | { readonly mode?: never; readonly permissions: FilePermissionSnapshot }
+);
 
 export interface ExecutableQuery {
   readonly name: string;

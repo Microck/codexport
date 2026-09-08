@@ -13,6 +13,7 @@ import type {
   ExecutableQuery,
   FileDigest,
   FilePermissions,
+  FilePermissionSnapshot,
   LoadCredentialInput,
   MachinePath,
   MachineDirectoryEntry,
@@ -89,6 +90,10 @@ export class MachineState extends Context.Service<MachineState, {
   readonly permissions: (
     path: MachinePath,
   ) => Effect.Effect<FilePermissions, MachineStateError>;
+  /** Capture rollback permissions without paying native ACL inspection costs during planning. */
+  readonly snapshotPermissions: (
+    path: MachinePath,
+  ) => Effect.Effect<FilePermissionSnapshot, MachineStateError>;
   readonly findExecutable: (
     query: ExecutableQuery,
   ) => Effect.Effect<DiscoveredExecutable, MachineStateError>;

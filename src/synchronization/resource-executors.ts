@@ -16,9 +16,9 @@ import {
 } from "../domain/resource.ts";
 import type { PlannedAction } from "../domain/synchronization.ts";
 import { composeTextFile, parseTextComposition, sourceTextIssue } from "../domain/text-composition.ts";
-import type { MachineStateError } from "../machine/machine-state.errors.ts";
+import { MachineFilesystemError, type MachineStateError } from "../machine/machine-state.errors.ts";
 import { MachineState } from "../machine/machine-state.service.ts";
-import type { MachinePath } from "../machine/machine-state.types.ts";
+import { FilePermissionSnapshot, type MachinePath } from "../machine/machine-state.types.ts";
 import {
   directoryVerificationDigest,
   sha256BytesHex,
@@ -80,13 +80,13 @@ const StoredFileSchema = Schema.Union([
   Schema.Struct({
     path: Schema.NonEmptyString,
     state: Schema.Literal("directory"),
-    mode: Schema.Int,
+    permissions: FilePermissionSnapshot,
   }),
   Schema.Struct({
     path: Schema.NonEmptyString,
     state: Schema.Literal("regular"),
     digest: ContentDigest,
-    mode: Schema.Int,
+    permissions: FilePermissionSnapshot,
   }),
   Schema.Struct({
     path: Schema.NonEmptyString,
@@ -187,8 +187,8 @@ const captureStoredFile = (
     );
     if (kind === undefined) return { path: path.absolute, state: "absent" };
     if (kind.kind === "directory") {
-      const permissions = yield* machine.permissions(path);
-      return { path: path.absolute, state: "directory", mode: permissions.mode };
+      const permissions = yield* machine.snapshotPermissions(path);
+      return { path: path.absolute, state: "directory", permissions };
     }
     const symlink = yield* machine.readSymlink(path).pipe(
       Effect.catchTag("MachineFilesystemError", () => Effect.succeed(undefined)),
@@ -197,12 +197,12 @@ const captureStoredFile = (
       return { path: path.absolute, state: "symlink", target: symlink };
     }
     const digest = yield* machine.digestFile({ path });
-    const permissions = yield* machine.permissions(path);
+    const permissions = yield* machine.snapshotPermissions(path);
     return {
       path: path.absolute,
       state: "regular",
       digest: digest.value,
-      mode: permissions.mode,
+      permissions,
     };
   });
 
@@ -210,10 +210,19 @@ const restoreStoredFile = (
   entry: StoredFile,
   reference: string,
   root?: MachinePath | undefined,
+  directoryPermissions: "restore" | "writable" = "restore",
 ): Effect.Effect<void, MachineStateError, MachineState> =>
   Effect.gen(function*() {
     const machine = yield* MachineState;
     const path = yield* machine.normalizePath({ path: entry.path });
+    if ((entry.state === "regular" || entry.state === "directory")
+      && (path.platform === "windows") !== (entry.permissions.platform === "windows")) {
+      return yield* new MachineFilesystemError({
+        operation: "restore permissions",
+        path: entry.path,
+        message: "permission snapshot belongs to a different platform",
+      });
+    }
     switch (entry.state) {
       case "absent":
         if (root === undefined) {
@@ -237,7 +246,10 @@ const restoreStoredFile = (
           }
         }
         return;
-      case "directory":
+      case "directory": {
+        const policy = directoryPermissions === "writable"
+          ? { mode: entry.permissions.mode | 0o700 }
+          : { permissions: entry.permissions };
         if (root === undefined) {
           const currentKind = yield* machine.inspectPath(path).pipe(
             Effect.catchTag("MachineFilesystemError", (error) =>
@@ -249,25 +261,26 @@ const restoreStoredFile = (
           if (currentKind !== undefined && currentKind.kind !== "directory") {
             yield* machine.removeFile({ path });
           }
-          yield* machine.ensureDirectory({ path, mode: entry.mode });
-          yield* machine.setPermissions({ path, mode: entry.mode });
+          yield* machine.ensureDirectory({ path, mode: entry.permissions.mode | 0o700 });
+          yield* machine.setPermissions({ path, ...policy });
         } else {
           yield* machine.mutateWithinRoot({
             root,
             path,
-            mutation: { kind: "directory", mode: entry.mode },
+            mutation: { kind: "directory", ...policy },
           });
         }
         return;
+      }
       case "regular": {
         const content = { file: backupFile(reference, entry.path), digest: entry.digest };
         if (root === undefined) {
-          yield* machine.atomicWrite({ path, content, mode: entry.mode });
+          yield* machine.atomicWrite({ path, content, permissions: entry.permissions });
         } else {
           yield* machine.mutateWithinRoot({
             root,
             path,
-            mutation: { kind: "write", content, mode: entry.mode },
+            mutation: { kind: "write", content, permissions: entry.permissions },
           });
         }
         return;
@@ -466,7 +479,7 @@ const restoreStoredFiles = (
     }
 
     if (rootDirectory !== undefined) {
-      yield* restoreStoredFile({ ...rootDirectory, mode: rootDirectory.mode | 0o700 }, reference);
+      yield* restoreStoredFile(rootDirectory, reference, undefined, "writable");
     } else {
       const currentKind = yield* machine.inspectPath(root).pipe(
         Effect.catchTag("MachineFilesystemError", (error) =>
@@ -489,7 +502,7 @@ const restoreStoredFiles = (
 
     for (const directory of [...deepestDirectories].reverse()) {
       if (directory === rootEntry) continue;
-      yield* restoreStoredFile({ ...directory, mode: directory.mode | 0o700 }, reference, root);
+      yield* restoreStoredFile(directory, reference, root, "writable");
     }
 
     for (const entry of deepestEntries) {
@@ -499,11 +512,10 @@ const restoreStoredFiles = (
 
     for (const directory of deepestDirectories) {
       if (directory === rootEntry) continue;
-      const path = yield* machine.normalizePath({ path: directory.path });
-      yield* machine.setPermissions({ path, mode: directory.mode });
+      yield* restoreStoredFile(directory, reference, root);
     }
     if (rootDirectory !== undefined) {
-      yield* machine.setPermissions({ path: root, mode: rootDirectory.mode });
+      yield* machine.setPermissions({ path: root, permissions: rootDirectory.permissions });
     } else if (rootEntry !== undefined && rootState === "absent") {
       yield* machine.removeEmptyDirectory({ path: root }).pipe(
         Effect.catchTag("MachineFilesystemError", (error) =>
@@ -738,7 +750,7 @@ const appendLocalOutput = (
       catch: (error) => new InvalidExecutionPlanError({ message: `cannot compose ${before.path}: ${String(error)}` }),
     });
     const mode = context.action.detail.kind === "remove-resource" && before.state === "regular"
-      ? before.mode : desired.mode ?? 0o600;
+      ? before.permissions.mode : desired.mode ?? 0o600;
     if (context.action.detail.kind === "remove-resource") {
       if (current === undefined) return { content: undefined, mode };
       if (current.kind !== "managed" || sha256Hex(current.source) !== desired.digest) {
@@ -776,7 +788,11 @@ const appendLocalOutput = (
 const sameTextSnapshot = (left: StoredFile, right: StoredTextFile): boolean =>
   left.state === "absent" && right.state === "absent"
     || left.state === "regular" && right.state === "regular"
-      && left.digest === right.digest && left.mode === right.mode;
+      && left.digest === right.digest && left.permissions.mode === right.permissions.mode
+      && (left.permissions.platform !== "windows"
+        ? right.permissions.platform !== "windows"
+        : right.permissions.platform === "windows"
+          && left.permissions.securityDescriptor === right.permissions.securityDescriptor);
 
 /** Refuse links and special objects before any file read, including recovery. */
 const inspectTextTarget = (path: MachinePath) => Effect.gen(function*() {
@@ -802,11 +818,11 @@ const restoreAppendLocal = (context: ResourceExecutionContext, stored: ReadonlyA
     const current = yield* captureStoredFile(path);
     if (sameTextSnapshot(current, before)) return;
     const { content, mode } = yield* appendLocalOutput(context, before, reference);
-    const after: StoredTextFile = content === undefined ? { path: before.path, state: "absent" } : {
-      path: before.path, state: "regular", digest: sha256BytesHex(content),
-      mode,
-    };
-    if (!sameTextSnapshot(current, after)) {
+    // The intended write has a portable mode, not the preimage's native ACL.
+    const matchesAfter = content === undefined ? current.state === "absent"
+      : current.state === "regular" && current.digest === sha256BytesHex(content)
+        && current.permissions.mode === mode;
+    if (!matchesAfter) {
       return yield* new InvalidExecutionPlanError({ message: `append-local target changed after the action: ${before.path}. Inspect the retained rollback backup before recovering.` });
     }
     yield* restoreStoredFile(before, reference);

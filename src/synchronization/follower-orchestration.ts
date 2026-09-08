@@ -685,9 +685,7 @@ const observe = (
         const machine = yield* MachineState;
         const executable = verification.method === "executable-present"
           ? verification.executable
-          : verification.method === "command"
-          ? verification.command[0] ?? desired.toolId
-          : desired.toolId;
+          : decoded.resource.target;
         if (executable.includes("/") || executable.includes("\\")) {
           return yield* machine.normalizePath({ path: executable }).pipe(
             Effect.flatMap((path) => machine.permissions(path)),

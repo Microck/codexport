@@ -47,7 +47,7 @@ Never put literal tokens in an agent tool call or create an unsupported file fla
 Use an approved user-level install only when needed:
 
 ```bash
-npm install --global @microck/canonfig@3.1.3
+npm install --global @microck/canonfig@3.1.4
 canonfig --version
 canonfig doctor --no-input --timeout-ms 5000
 ```

@@ -3,6 +3,7 @@ import {
   access,
   lstat,
   mkdir,
+  mkdtemp,
   open,
   readFile,
   realpath,
@@ -627,57 +628,96 @@ export const windowsMachineStateLayer = (
           Effect.andThen(setPrivateAcl(path, true)),
           Effect.andThen(writeSemanticMode(path, mode)),
         );
+      const ensureFileParent = (
+        parent: string,
+      ): Effect.Effect<void, MachineStateError> => Effect.gen(function*() {
+        const missing = yield* Effect.tryPromise({
+          try: async () => {
+            try {
+              await stat(parent);
+              return false;
+            } catch (cause) {
+              if (errorCode(cause) === "ENOENT" && win32.dirname(parent) !== parent) return true;
+              throw cause;
+            }
+          },
+          catch: (cause) => filesystemFailure("inspect Windows file parent", parent, cause),
+        });
+        if (!missing) return;
+        const ancestor = win32.dirname(parent);
+        yield* ensureFileParent(ancestor);
+        const staging = yield* Effect.tryPromise({
+          try: () => mkdtemp(win32.join(ancestor, ".canonfig-directory-")),
+          catch: (cause) => filesystemFailure("stage Windows directory", parent, cause),
+        });
+        // A new parent becomes visible at its final path only after protection.
+        // Concurrent creators may fail at rename, but cannot use an unprotected parent.
+        yield* setPrivateAcl(staging, true).pipe(
+          Effect.andThen(Effect.tryPromise({
+            try: () => rename(staging, parent),
+            catch: (cause) => filesystemFailure("publish Windows directory", parent, cause),
+          })),
+          Effect.ensuring(Effect.promise(() => rmdir(staging).catch(() => undefined))),
+        );
+      });
       const secureAtomicWrite = (
         path: string,
         content: FileContent,
         mode: number,
       ): Effect.Effect<void, MachineStateError> => {
         const parent = win32.dirname(path);
-        const temporary = win32.join(
-          parent,
-          `.${win32.basename(path)}.canonfig-${randomBytes(12).toString("hex")}`,
-        );
         return Effect.gen(function*() {
-          yield* secureDirectory(parent, semanticModes.get(parent) ?? 0o700);
-          yield* Effect.tryPromise({
-            try: async () => {
-              let handle: Awaited<ReturnType<typeof open>> | undefined;
-              try {
-                handle = await open(temporary, "wx");
-                await writeFileContent(handle, content);
-                await handle.sync().catch((cause: NodeJS.ErrnoException) => {
-                  if (cause.code !== "EPERM" && cause.code !== "EINVAL") throw cause;
-                });
-                await handle.close();
-                handle = undefined;
-              } finally {
-                if (handle !== undefined) {
-                  await handle.close().catch(() => undefined);
+          // A file resource does not own its existing parent or siblings. Restrict
+          // an empty staging directory before creating any content inside it.
+          yield* ensureFileParent(parent);
+          const staging = yield* Effect.tryPromise({
+            try: () => mkdtemp(win32.join(parent, ".canonfig-write-")),
+            catch: (cause) => filesystemFailure("stage Windows file", path, cause),
+          });
+          const temporary = win32.join(staging, "content");
+          yield* Effect.gen(function*() {
+            yield* setPrivateAcl(staging, true);
+            yield* Effect.tryPromise({
+              try: async () => {
+                let handle: Awaited<ReturnType<typeof open>> | undefined;
+                try {
+                  handle = await open(temporary, "wx");
+                  await writeFileContent(handle, content);
+                  await handle.sync().catch((cause: NodeJS.ErrnoException) => {
+                    if (cause.code !== "EPERM" && cause.code !== "EINVAL") throw cause;
+                  });
+                  await handle.close();
+                  handle = undefined;
+                } finally {
+                  if (handle !== undefined) {
+                    await handle.close().catch(() => undefined);
+                  }
                 }
-              }
-            },
-            catch: (cause) =>
-              filesystemFailure("atomically write Windows file", path, cause),
-          });
-          yield* setPrivateAcl(temporary, false);
-          yield* Effect.tryPromise({
-            try: () => prepareWindowsManagedLeafKind(path, "non-directory"),
-            catch: (cause) =>
-              filesystemFailure("prepare Windows file replacement", path, cause),
-          });
-          yield* Effect.tryPromise({
-            try: () => rename(temporary, path),
-            catch: (cause) =>
-              filesystemFailure("replace Windows file", path, cause),
-          });
-          yield* setPrivateAcl(path, false);
-          yield* writeSemanticMode(path, mode);
-        }).pipe(
-          Effect.ensuring(Effect.promise(() =>
-            rm(temporary, { force: true }).catch(() => undefined)
-          )),
-          Effect.uninterruptible,
-        );
+              },
+              catch: (cause) =>
+                filesystemFailure("atomically write Windows file", path, cause),
+            });
+            yield* setPrivateAcl(temporary, false);
+            yield* Effect.tryPromise({
+              try: () => prepareWindowsManagedLeafKind(path, "non-directory"),
+              catch: (cause) =>
+                filesystemFailure("prepare Windows file replacement", path, cause),
+            });
+            yield* Effect.tryPromise({
+              try: () => rename(temporary, path),
+              catch: (cause) =>
+                filesystemFailure("replace Windows file", path, cause),
+            });
+            yield* setPrivateAcl(path, false);
+            yield* writeSemanticMode(path, mode);
+          }).pipe(
+            Effect.ensuring(Effect.promise(() =>
+              rm(temporary, { force: true }).catch(() => undefined).then(() =>
+                rmdir(staging).catch(() => undefined)
+              )
+            )),
+          );
+        }).pipe(Effect.uninterruptible);
       };
       const isWithinRoot = (root: string, candidate: string): boolean => {
         const remainder = win32.relative(root.toLowerCase(), candidate.toLowerCase());
@@ -1346,11 +1386,13 @@ export const windowsMachineStateLayer = (
             }
             const name = createHash("sha256").update(input.name).digest("hex");
             const path = win32.join(localCredentialRoot, `${name}.credential`);
-            return secureAtomicWrite(
-              path,
-              new TextEncoder().encode(Redacted.value(input.value)),
-              0o600,
-            ).pipe(
+            // Credential storage owns this directory; ordinary file writes do not.
+            return secureDirectory(localCredentialRoot, 0o700).pipe(
+              Effect.andThen(secureAtomicWrite(
+                path,
+                new TextEncoder().encode(Redacted.value(input.value)),
+                0o600,
+              )),
               Effect.as(decode(CredentialReference)(`local-file:${path}`)),
             );
           }

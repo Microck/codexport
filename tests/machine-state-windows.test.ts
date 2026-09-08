@@ -1,8 +1,14 @@
 import { mkdtempSync } from "node:fs";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { tmpdir } from "node:os";
+import { promisify } from "node:util";
 import { dirname, join } from "node:path";
 import { win32 } from "node:path";
 
 import { describe, expect, it } from "vitest";
+import { Effect, Redacted } from "effect";
+import { MachineState } from "../src/machine/machine-state.service.ts";
 
 import {
   decodeWindowsTaskXml,
@@ -57,6 +63,109 @@ const environment = (root: string) => {
     { name: "SystemRoot", value: process.env.SystemRoot ?? "C:\\Windows" },
   ];
 };
+
+describe.skipIf(process.platform !== "win32")("Windows file permission ownership", () => {
+  const inspectAcl = async (path: string) => {
+    const powershell = join(process.env.SystemRoot ?? "C:\\Windows",
+      "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const output = await promisify(execFile)(powershell, [
+      "-NoProfile", "-NonInteractive", "-Command",
+      // Use .NET directly: PowerShell 7 launchers can pass a module search
+      // path that prevents Windows PowerShell from loading Get-Acl.
+      "$acl = if ([System.IO.Directory]::Exists($env:CANONFIG_TEST_PATH)) { "
+        + "[System.IO.Directory]::GetAccessControl($env:CANONFIG_TEST_PATH) "
+        + "} else { [System.IO.File]::GetAccessControl($env:CANONFIG_TEST_PATH) }; "
+        + "$acl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::All)",
+    ], { env: { ...process.env, CANONFIG_TEST_PATH: path } });
+    return output.stdout.trim();
+  };
+
+  it.each([{ parents: [] }, { parents: ["new", "nested"] }])(
+    "preserves existing ACLs and protects new file paths ($parents)",
+    async ({ parents }) => {
+      const root = await mkdtemp(join(tmpdir(), "canonfig-file-permissions-"));
+      const target = join(root, ...parents, "settings.json");
+      const sibling = join(root, "unmanaged.txt");
+      const source = join(root, "source.txt");
+      try {
+        const parentAcl = await inspectAcl(root);
+        if (parents.length > 0) {
+          const failingAclEnvironment = Object.entries(process.env).flatMap(([name, value]) =>
+            value === undefined || name === "CANONFIG_ICACLS" ? [] : [{ name, value }]
+          );
+          failingAclEnvironment.push({
+            name: "CANONFIG_ICACLS", value: join(root, "missing-icacls.exe"),
+          });
+          await expect(Effect.runPromise(Effect.gen(function*() {
+            const machine = yield* MachineState;
+            const path = yield* machine.normalizePath({ path: target });
+            yield* machine.atomicWrite({ path, content: Buffer.from("must not be written") });
+          }).pipe(Effect.provide(windowsMachineStateLayer({
+            environment: failingAclEnvironment,
+          }))))).rejects.toThrow();
+          expect(await readdir(root)).toEqual([]);
+        }
+        await writeFile(sibling, "keep sibling");
+        await writeFile(source, "file-source content");
+        const siblingAcl = await inspectAcl(sibling);
+        await Effect.runPromise(Effect.gen(function*() {
+          const machine = yield* MachineState;
+          const path = yield* machine.normalizePath({ path: target });
+          yield* machine.atomicWrite({ path, content: Buffer.from("buffer content") });
+          expect(yield* Effect.promise(() => readFile(target, "utf8"))).toBe("buffer content");
+          const sourcePath = yield* machine.normalizePath({ path: source });
+          const digest = (yield* machine.digestFile({ path: sourcePath })).value;
+          yield* machine.atomicWrite({ path, content: { file: source, digest } });
+          expect(yield* Effect.promise(() => readFile(target, "utf8"))).toBe("file-source content");
+        }).pipe(Effect.provide(windowsMachineStateLayer())));
+        expect(await inspectAcl(root)).toBe(parentAcl);
+        expect(await inspectAcl(sibling)).toBe(siblingAcl);
+        expect(await readFile(sibling, "utf8")).toBe("keep sibling");
+        expect((await readdir(root)).sort()).toEqual([
+          parents[0] ?? "settings.json", "source.txt", "unmanaged.txt",
+        ]);
+        for (let index = 1; index <= parents.length; index++) {
+          const acl = await inspectAcl(join(root, ...parents.slice(0, index)));
+          expect(acl).not.toMatch(/;;;(?:WD|AU|BU)\)/u);
+        }
+        const targetAcl = await inspectAcl(target);
+        // Protected DACLs do not regain inherited broad access on publication.
+        expect(targetAcl).toContain("D:P");
+        expect(targetAcl).not.toMatch(/;;;(?:WD|AU|BU)\)/u);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
+
+  it("protects a new local credential directory without changing its parent", async () => {
+    const root = await mkdtemp(join(tmpdir(), "canonfig-credential-permissions-"));
+    const credentials = join(root, "credentials");
+    try {
+      const parentAcl = await inspectAcl(root);
+      const reference = await Effect.runPromise(Effect.gen(function*() {
+        const machine = yield* MachineState;
+        return yield* machine.storeCredential({
+          name: "acl-fixture",
+          value: Redacted.make("public test fixture"),
+        });
+      }).pipe(Effect.provide(windowsMachineStateLayer({
+        credentialPolicy: { kind: "local-file", path: credentials },
+      }))));
+      const credentialPath = String(reference).slice("local-file:".length);
+      expect(await readFile(credentialPath, "utf8")).toBe("public test fixture");
+      for (const path of [credentials, credentialPath]) {
+        const acl = await inspectAcl(path);
+        expect(acl).toContain("D:P");
+        expect(acl).not.toMatch(/;;;(?:WD|AU|BU)\)/u);
+      }
+      expect(await inspectAcl(root)).toBe(parentAcl);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+});
 
 describe("Windows ACL command rendering", () => {
   it("renders shell-free current-user-only ACL arguments", () => {

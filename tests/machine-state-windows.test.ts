@@ -80,38 +80,48 @@ describe.skipIf(process.platform !== "win32")("Windows file permission ownership
     return output.stdout.trim();
   };
 
-  it("preserves parent and sibling ACLs when publishing private file content", async () => {
-    const root = await mkdtemp(join(tmpdir(), "canonfig-file-permissions-"));
-    const target = join(root, "settings.json");
-    const sibling = join(root, "unmanaged.txt");
-    const source = join(root, "source.txt");
-    try {
-      await writeFile(sibling, "keep sibling");
-      await writeFile(source, "file-source content");
-      const parentAcl = await inspectAcl(root);
-      const siblingAcl = await inspectAcl(sibling);
-      await Effect.runPromise(Effect.gen(function*() {
-        const machine = yield* MachineState;
-        const path = yield* machine.normalizePath({ path: target });
-        yield* machine.atomicWrite({ path, content: Buffer.from("buffer content") });
-        expect(yield* Effect.promise(() => readFile(target, "utf8"))).toBe("buffer content");
-        const sourcePath = yield* machine.normalizePath({ path: source });
-        const digest = (yield* machine.digestFile({ path: sourcePath })).value;
-        yield* machine.atomicWrite({ path, content: { file: source, digest } });
-        expect(yield* Effect.promise(() => readFile(target, "utf8"))).toBe("file-source content");
-      }).pipe(Effect.provide(windowsMachineStateLayer())));
-      expect(await inspectAcl(root)).toBe(parentAcl);
-      expect(await inspectAcl(sibling)).toBe(siblingAcl);
-      expect(await readFile(sibling, "utf8")).toBe("keep sibling");
-      expect((await readdir(root)).sort()).toEqual(["settings.json", "source.txt", "unmanaged.txt"]);
-      const targetAcl = await inspectAcl(target);
-      // Protected DACLs do not regain inherited broad access on publication.
-      expect(targetAcl).toContain("D:P");
-      expect(targetAcl).not.toMatch(/;;;(?:WD|AU|BU)\)/u);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  }, 30_000);
+  it.each([{ parents: [] }, { parents: ["new", "nested"] }])(
+    "preserves existing ACLs and protects new file paths ($parents)",
+    async ({ parents }) => {
+      const root = await mkdtemp(join(tmpdir(), "canonfig-file-permissions-"));
+      const target = join(root, ...parents, "settings.json");
+      const sibling = join(root, "unmanaged.txt");
+      const source = join(root, "source.txt");
+      try {
+        await writeFile(sibling, "keep sibling");
+        await writeFile(source, "file-source content");
+        const parentAcl = await inspectAcl(root);
+        const siblingAcl = await inspectAcl(sibling);
+        await Effect.runPromise(Effect.gen(function*() {
+          const machine = yield* MachineState;
+          const path = yield* machine.normalizePath({ path: target });
+          yield* machine.atomicWrite({ path, content: Buffer.from("buffer content") });
+          expect(yield* Effect.promise(() => readFile(target, "utf8"))).toBe("buffer content");
+          const sourcePath = yield* machine.normalizePath({ path: source });
+          const digest = (yield* machine.digestFile({ path: sourcePath })).value;
+          yield* machine.atomicWrite({ path, content: { file: source, digest } });
+          expect(yield* Effect.promise(() => readFile(target, "utf8"))).toBe("file-source content");
+        }).pipe(Effect.provide(windowsMachineStateLayer())));
+        expect(await inspectAcl(root)).toBe(parentAcl);
+        expect(await inspectAcl(sibling)).toBe(siblingAcl);
+        expect(await readFile(sibling, "utf8")).toBe("keep sibling");
+        expect((await readdir(root)).sort()).toEqual([
+          parents[0] ?? "settings.json", "source.txt", "unmanaged.txt",
+        ]);
+        for (let index = 1; index <= parents.length; index++) {
+          const acl = await inspectAcl(join(root, ...parents.slice(0, index)));
+          expect(acl).not.toMatch(/;;;(?:WD|AU|BU)\)/u);
+        }
+        const targetAcl = await inspectAcl(target);
+        // Protected DACLs do not regain inherited broad access on publication.
+        expect(targetAcl).toContain("D:P");
+        expect(targetAcl).not.toMatch(/;;;(?:WD|AU|BU)\)/u);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
 
   it("protects a new local credential directory without changing its parent", async () => {
     const root = await mkdtemp(join(tmpdir(), "canonfig-credential-permissions-"));

@@ -637,11 +637,15 @@ export const windowsMachineStateLayer = (
         return Effect.gen(function*() {
           // A file resource does not own its existing parent or siblings. Restrict
           // an empty staging directory before creating any content inside it.
+          const createdParent = yield* Effect.tryPromise({
+            try: () => mkdir(parent, { recursive: true }),
+            catch: (cause) => filesystemFailure("ensure Windows file parent", path, cause),
+          });
+          // mkdir reports the first directory it created. Its inheritable ACL
+          // protects the new subtree without changing the existing ancestor.
+          if (createdParent !== undefined) yield* setPrivateAcl(createdParent, true);
           const staging = yield* Effect.tryPromise({
-            try: async () => {
-              await mkdir(parent, { recursive: true });
-              return mkdtemp(win32.join(parent, ".canonfig-write-"));
-            },
+            try: () => mkdtemp(win32.join(parent, ".canonfig-write-")),
             catch: (cause) => filesystemFailure("stage Windows file", path, cause),
           });
           const temporary = win32.join(staging, "content");

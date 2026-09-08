@@ -1,5 +1,5 @@
 import { mkdtempSync } from "node:fs";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
@@ -9,6 +9,13 @@ import { win32 } from "node:path";
 import { describe, expect, it } from "vitest";
 import { Effect, Redacted } from "effect";
 import { MachineState } from "../src/machine/machine-state.service.ts";
+import { ActionId, ResourceId, RunId } from "../src/domain/brand.ts";
+import { sha256BytesHex } from "../src/profile/profile-codec.ts";
+import { defaultSynchronizationExecutionLimits } from "../src/synchronization/executor.ts";
+import {
+  prepareResourceAction,
+  type ResourceExecutionContext,
+} from "../src/synchronization/resource-executors.ts";
 
 import {
   decodeWindowsTaskXml,
@@ -65,9 +72,9 @@ const environment = (root: string) => {
 };
 
 describe.skipIf(process.platform !== "win32")("Windows file permission ownership", () => {
+  const powershell = join(process.env.SystemRoot ?? "C:\\Windows",
+    "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
   const inspectAcl = async (path: string) => {
-    const powershell = join(process.env.SystemRoot ?? "C:\\Windows",
-      "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
     const output = await promisify(execFile)(powershell, [
       "-NoProfile", "-NonInteractive", "-Command",
       // Use .NET directly: PowerShell 7 launchers can pass a module search
@@ -79,6 +86,86 @@ describe.skipIf(process.platform !== "win32")("Windows file permission ownership
     ], { env: { ...process.env, CANONFIG_TEST_PATH: path } });
     return output.stdout.trim();
   };
+
+  it.each(["file", "directory"] as const)("restores persisted %s permissions in a fresh process", async (kind) => {
+    const root = await mkdtemp(join(tmpdir(), "canonfig-native-rollback-"));
+    const managed = join(root, "managed");
+    const nested = join(managed, "nested");
+    const target = join(nested, "settings.json");
+    try {
+      await mkdir(nested, { recursive: true });
+      await writeFile(target, "original content");
+      // An administrator token can create files owned by its default group.
+      // Capture a user-owned preimage so replacement must restore the owner too.
+      await promisify(execFile)(powershell, ["-NoProfile", "-NonInteractive", "-Command",
+        "$ErrorActionPreference='Stop'; $path=$env:CANONFIG_TEST_PATH; "
+          + "$acl=[IO.File]::GetAccessControl($path); "
+          + "$acl.SetOwner([Security.Principal.WindowsIdentity]::GetCurrent().User); "
+          + "[IO.File]::SetAccessControl($path,$acl)",
+      ], { env: { ...process.env, CANONFIG_TEST_PATH: target } });
+      const ownedPaths = kind === "directory" ? [managed, nested, target] : [target];
+      const originalAcls = await Promise.all(ownedPaths.map(inspectAcl));
+      const parentAcl = await inspectAcl(root);
+      const resource = ResourceId.make("permission-fixture");
+      const content = Buffer.from("desired content");
+      const digest = sha256BytesHex(content);
+      const relative = "nested/settings.json";
+      const resourceTarget = kind === "directory" ? managed : target;
+      const detail = kind === "directory"
+        ? { kind: "mirror-directory" as const, target: managed, adds: [relative], removes: [] }
+        : { kind: "write-file" as const, target, digest, executable: false, mode: 0o600 };
+      const context: ResourceExecutionContext = {
+        run: RunId.make("run-native-permissions"),
+        action: { id: ActionId.make("action:native-permissions:0:write"), resource, kind: detail.kind, detail, before: [] },
+        resource: { id: resource, kind, policy: kind === "directory" ? "mirror-owned" : "replace",
+          target: resourceTarget, dependsOn: [], blobs: [] },
+        desired: kind === "directory"
+          ? { kind, mode: 0o700, directories: [], files: [{ path: relative, digest, mode: 0o600, executable: false }] }
+          : { kind, digest, mode: 0o600, executable: false },
+        verification: { method: "digest", digest },
+        artifacts: new Map([[digest, { digest, content }]]),
+        limits: defaultSynchronizationExecutionLimits,
+      };
+      const localEnvironment = Object.entries(process.env).flatMap(([name, value]) =>
+        value === undefined || name.toUpperCase() === "LOCALAPPDATA" ? [] : [{ name, value }]
+      );
+      localEnvironment.push({ name: "LOCALAPPDATA", value: join(root, "cache") });
+      const layer = () => windowsMachineStateLayer({ environment: localEnvironment });
+      const reference = await Effect.runPromise(Effect.gen(function*() {
+        const prepared = yield* prepareResourceAction(context);
+        yield* prepared.execute;
+        return prepared.rollbackReference;
+      }).pipe(Effect.provide(layer())));
+      if (reference === undefined) throw new Error("expected a persisted rollback journal");
+      expect(await readFile(target, "utf8")).toBe("desired content");
+      expect(await inspectAcl(target)).not.toBe(originalAcls.at(-1));
+
+      // Reconstruct recovery from disk in a fresh process, then replay it.
+      // Compare against native observations, not the adapter's snapshot reader.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await promisify(execFile)(process.execPath, ["--input-type=module", "--eval", `
+          import { Effect } from "effect";
+          import { windowsMachineStateLayer } from "./src/machine/windows.layer.ts";
+          import { restoreRollbackReference } from "./src/synchronization/resource-executors.ts";
+          const context = JSON.parse(process.env.CANONFIG_TEST_CONTEXT);
+          context.artifacts = new Map();
+          await Effect.runPromise(restoreRollbackReference(context, process.env.CANONFIG_TEST_REFERENCE)
+            .pipe(Effect.provide(windowsMachineStateLayer())));
+        `], {
+          cwd: dirname(import.meta.dirname),
+          env: { ...process.env, LOCALAPPDATA: join(root, "cache"),
+            CANONFIG_TEST_CONTEXT: JSON.stringify({ ...context, artifacts: [] }),
+            CANONFIG_TEST_REFERENCE: reference },
+          timeout: 30_000,
+        });
+        expect(await readFile(target, "utf8")).toBe("original content");
+        expect(await Promise.all(ownedPaths.map(inspectAcl))).toEqual(originalAcls);
+        expect(await inspectAcl(root)).toBe(parentAcl);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   it.each([{ parents: [] }, { parents: ["new", "nested"] }])(
     "preserves existing ACLs and protects new file paths ($parents)",

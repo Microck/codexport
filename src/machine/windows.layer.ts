@@ -40,6 +40,8 @@ import type {
   CredentialPolicy,
   CredentialStorageCapability,
   FilePermissions,
+  FilePermissionPolicy,
+  FilePermissionSnapshot,
   FileContent,
   MachinePath,
   NormalizePathInput,
@@ -205,6 +207,44 @@ const validateSingleLine = (
 
 const powershellLiteral = (value: string): string =>
   `'${value.replaceAll("'", "''")}'`;
+
+// BackupWrite restores captured ACLs verbatim. SetAccessControl recalculates
+// inheritance from the temporary guard parent and propagates changes to children.
+// Open only the permission rights needed for restoration; do not enable privileges.
+const nativePermissionRestore = `
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class CanonfigPermissionRestore {
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  static extern bool BackupWrite(SafeFileHandle file, byte[] bytes, uint length, out uint written, bool abort, bool security, ref IntPtr context);
+  public static void Restore(string path, byte[] descriptor) {
+    // READ_CONTROL | WRITE_DAC | WRITE_OWNER; share read/write/delete;
+    // OPEN_EXISTING; BACKUP_SEMANTICS (directories) | OPEN_REPARSE_POINT.
+    using (var handle = CreateFileW(path, 0x000e0000, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero)) {
+      if (handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
+      byte[] stream;
+      using (var buffer = new MemoryStream()) {
+        using (var writer = new BinaryWriter(buffer)) {
+          // WIN32_STREAM_ID for BACKUP_SECURITY_DATA, followed by its descriptor.
+          writer.Write((uint)3); writer.Write((uint)0); writer.Write((long)descriptor.Length);
+          writer.Write((uint)0); writer.Write(descriptor); stream = buffer.ToArray();
+        }
+      }
+      IntPtr context = IntPtr.Zero; uint written;
+      try {
+        if (!BackupWrite(handle, stream, (uint)stream.Length, out written, false, true, ref context))
+          throw new Win32Exception(Marshal.GetLastWin32Error());
+        if (written != stream.Length) throw new IOException("Incomplete security stream write");
+      } finally { BackupWrite(handle, null, 0, out written, true, false, ref context); }
+    }
+  }
+}
+`;
 
 const weekdayXmlNames = {
   Sun: "Sunday",
@@ -619,15 +659,21 @@ export const windowsMachineStateLayer = (
       };
       const secureDirectory = (
         path: string,
-        mode: number,
+        permissionPolicy: FilePermissionPolicy,
       ): Effect.Effect<void, MachineStateError> =>
-        Effect.tryPromise({
-          try: () => mkdir(path, { recursive: true }).then(() => undefined),
-          catch: (cause) => filesystemFailure("ensure Windows directory", path, cause),
-        }).pipe(
-          Effect.andThen(setPrivateAcl(path, true)),
-          Effect.andThen(writeSemanticMode(path, mode)),
-        );
+        Effect.gen(function*() {
+          yield* Effect.tryPromise({
+            try: () => mkdir(path, { recursive: true }).then(() => undefined),
+            catch: (cause) => filesystemFailure("ensure Windows directory", path, cause),
+          });
+          // Final rollback permissions must not reapply a managed ACL: that
+          // would propagate into children whose snapshots are already restored.
+          if (permissionPolicy.permissions === undefined) yield* setPrivateAcl(path, true);
+          yield* writeSemanticMode(path, permissionPolicy.permissions?.mode ?? permissionPolicy.mode ?? 0o700);
+          if (permissionPolicy.permissions !== undefined) {
+            yield* restoreNativePermissions(path, permissionPolicy.permissions, true);
+          }
+        });
       const ensureFileParent = (
         parent: string,
       ): Effect.Effect<void, MachineStateError> => Effect.gen(function*() {
@@ -663,7 +709,7 @@ export const windowsMachineStateLayer = (
       const secureAtomicWrite = (
         path: string,
         content: FileContent,
-        mode: number,
+        permissionPolicy: FilePermissionPolicy,
       ): Effect.Effect<void, MachineStateError> => {
         const parent = win32.dirname(path);
         return Effect.gen(function*() {
@@ -708,8 +754,14 @@ export const windowsMachineStateLayer = (
               catch: (cause) =>
                 filesystemFailure("replace Windows file", path, cause),
             });
-            yield* setPrivateAcl(path, false);
-            yield* writeSemanticMode(path, mode);
+            yield* writeSemanticMode(path, permissionPolicy.permissions?.mode ?? permissionPolicy.mode ?? 0o600);
+            if (permissionPolicy.permissions !== undefined) {
+              // Restore native permissions before releasing the guarded mutation.
+              // Keep the complete content private until this final step succeeds.
+              yield* restoreNativePermissions(path, permissionPolicy.permissions, false);
+            } else {
+              yield* setPrivateAcl(path, false);
+            }
           }).pipe(
             Effect.ensuring(Effect.promise(() =>
               rm(temporary, { force: true }).catch(() => undefined).then(() =>
@@ -790,14 +842,14 @@ export const windowsMachineStateLayer = (
         }
         if (mutation.kind === "directory") {
           await prepareWindowsManagedLeafKind(guardedTarget, "directory");
-          await Effect.runPromise(secureDirectory(guardedTarget, mutation.mode));
+          await Effect.runPromise(secureDirectory(guardedTarget, mutation));
           return true;
         }
         if (mutation.kind === "write") {
           await Effect.runPromise(secureAtomicWrite(
             guardedTarget,
             mutation.content,
-            mutation.mode ?? 0o600,
+            mutation,
           ));
           return true;
         }
@@ -969,6 +1021,34 @@ export const windowsMachineStateLayer = (
         script: string,
         additions: ReadonlyArray<ProcessEnvironmentEntry>,
       ) => runPowerShell(script, 5_000, additions);
+      const permissionSections = "[Security.AccessControl.AccessControlSections]'Access,Owner,Group'";
+      const restoreNativePermissions = Effect.fn("MachineState.restoreNativePermissions")(
+        function*(path: string, snapshot: FilePermissionSnapshot, directory: boolean) {
+          if (snapshot.platform !== "windows") {
+            return yield* filesystemFailure("restore Windows permissions", path, "expected a Windows permission snapshot");
+          }
+          const nativeType = directory ? "Directory" : "File";
+          const restored = yield* runPowerShell([
+            "$ErrorActionPreference='Stop'",
+            `$path=${powershellLiteral(path)}`,
+            `$sections=${permissionSections}`,
+            `$expected=${powershellLiteral(snapshot.securityDescriptor)}`,
+            `Add-Type -TypeDefinition ${powershellLiteral(nativePermissionRestore)}`,
+            "$security=New-Object Security.AccessControl.RawSecurityDescriptor($expected)",
+            "$binary=New-Object byte[] $security.BinaryLength",
+            "$security.GetBinaryForm($binary,0)",
+            "[CanonfigPermissionRestore]::Restore($path,$binary)",
+            `$actual=[IO.${nativeType}]::GetAccessControl($path,$sections).GetSecurityDescriptorSddlForm($sections)`,
+            "if($actual -cne $expected){throw 'Restored owner, group or access rules differ from the permission snapshot'}",
+          ].join(";"), 10_000);
+          if (restored.exitCode !== 0) {
+            return yield* filesystemFailure(
+              "restore Windows permissions", path,
+              new TextDecoder().decode(restored.standardError).trim() || "Windows refused the captured permission snapshot",
+            );
+          }
+        },
+      );
       const runSchedulerCommand = (arguments_: ReadonlyArray<string>) =>
         machine.runProcess({
           executable: { platform: "linux", absolute: schtasks },
@@ -1217,7 +1297,7 @@ export const windowsMachineStateLayer = (
         ensureDirectory: (input) =>
           requireWindowsPath(input.path).pipe(
             Effect.flatMap((path) =>
-              secureDirectory(path.absolute, input.mode ?? 0o700)
+              secureDirectory(path.absolute, input)
             ),
           ),
         atomicWrite: (input) =>
@@ -1226,7 +1306,7 @@ export const windowsMachineStateLayer = (
               secureAtomicWrite(
                 path.absolute,
                 input.content,
-                input.mode ?? 0o600,
+                input,
               )
             ),
           ),
@@ -1273,9 +1353,14 @@ export const windowsMachineStateLayer = (
                   filesystemFailure("inspect Windows file type", path.absolute, cause),
               }).pipe(
                 Effect.flatMap((metadata) =>
-                  setPrivateAcl(path.absolute, metadata.isDirectory())
+                  input.permissions === undefined
+                    ? setPrivateAcl(path.absolute, metadata.isDirectory()).pipe(
+                      Effect.andThen(writeSemanticMode(path.absolute, input.mode)),
+                    )
+                    : writeSemanticMode(path.absolute, input.permissions.mode).pipe(
+                      Effect.andThen(restoreNativePermissions(path.absolute, input.permissions, metadata.isDirectory())),
+                    )
                 ),
-                Effect.andThen(writeSemanticMode(path.absolute, input.mode)),
               )
             ),
           ),
@@ -1304,6 +1389,27 @@ export const windowsMachineStateLayer = (
               )
             ),
           ),
+        snapshotPermissions: Effect.fn("MachineState.snapshotPermissions")(function*(path: MachinePath) {
+          const nativePath = yield* requireWindowsPath(path);
+          const metadata = yield* Effect.tryPromise({
+            try: () => lstat(nativePath.absolute),
+            catch: (cause) => filesystemFailure("inspect Windows permissions", nativePath.absolute, cause),
+          });
+          const mode = yield* readSemanticMode(nativePath.absolute, metadata.isDirectory() ? 0o700 : 0o600);
+          const captured = yield* runPowerShell([
+            "$ErrorActionPreference='Stop'",
+            `$sections=${permissionSections}`,
+            `[IO.${metadata.isDirectory() ? "Directory" : "File"}]::GetAccessControl(${powershellLiteral(nativePath.absolute)},$sections).GetSecurityDescriptorSddlForm($sections)`,
+          ].join(";"), 10_000);
+          const securityDescriptor = new TextDecoder().decode(captured.standardOutput).trim();
+          if (captured.exitCode !== 0 || securityDescriptor.length === 0) {
+            return yield* filesystemFailure(
+              "capture Windows permissions", nativePath.absolute,
+              new TextDecoder().decode(captured.standardError).trim() || "Windows did not return a permission snapshot",
+            );
+          }
+          return { platform: "windows" as const, mode, securityDescriptor };
+        }),
         findExecutable: (query) => {
           if (
             query.name.length === 0
@@ -1387,11 +1493,11 @@ export const windowsMachineStateLayer = (
             const name = createHash("sha256").update(input.name).digest("hex");
             const path = win32.join(localCredentialRoot, `${name}.credential`);
             // Credential storage owns this directory; ordinary file writes do not.
-            return secureDirectory(localCredentialRoot, 0o700).pipe(
+            return secureDirectory(localCredentialRoot, { mode: 0o700 }).pipe(
               Effect.andThen(secureAtomicWrite(
                 path,
                 new TextEncoder().encode(Redacted.value(input.value)),
-                0o600,
+                { mode: 0o600 },
               )),
               Effect.as(decode(CredentialReference)(`local-file:${path}`)),
             );

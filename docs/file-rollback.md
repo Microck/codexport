@@ -9,14 +9,22 @@ to binary rollback.
 
 - Every regular-file preimage is a private raw file beside its action journal.
   Its name is derived from the immutable action ID and normalized target path.
-- The journal records object kinds, target paths, modes, and SHA-256 digests.
+- The journal records object kinds, target paths, permission snapshots, and SHA-256 digests.
   It contains no encoded file bodies or caller-chosen backup paths.
+- A permission snapshot contains a POSIX mode on Linux and macOS. On Windows
+  it contains the semantic mode and the native owner, group, and DACL security
+  descriptor, including inheritance flags. Windows audit rules are not captured.
+  Capture native permissions only for rollback, not during ordinary planning.
 - Capture copies each file with bounded memory, checks its digest, and flushes
   it before publishing the journal. The executor records the journal reference
   before starting the target mutation.
 - Recovery derives the allowed targets and backup names from the recorded
   action. It copies a regular preimage into a temporary sibling, checks its
-  digest before replacement, and preserves the captured permission intent.
+  digest before replacement, and restores the captured permissions through the
+  same guarded mutation. Windows checks the restored descriptor against the
+  captured value. Failure retains the journal and preimages.
+- Restore managed directories with writable modes while restoring their children.
+  Restore exact directory permissions from the deepest directory up, root last.
 - The same atomic-write path handles byte buffers and file sources. Native
   permission handling and managed-directory confinement apply to both.
   If an adapter isolates a directory by moving it, file sources inside that
@@ -34,7 +42,7 @@ durability on every operating system.
 
 This is the only current file-rollback format. Before upgrading, finish or
 recover any unfinished run with the CLI that created it. An old inline-body
-journal is rejected with a recovery diagnostic and is not rewritten or deleted
+or mode-only journal is rejected with a recovery diagnostic and is not rewritten or deleted
 by a failed recovery attempt.
 
 ## Acceptance
@@ -57,6 +65,13 @@ explains why original content must be recorded and flushed before mutation,
 and why rollback material must remain until restoration or commit finishes.
 Canonfig retains its existing action journal rather than adding a second
 transaction engine.
+
+[Windows BackupWrite](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-backupwrite)
+restores the native security stream with write-owner and write-DACL access.
+Ordinary access-rule setters recalculate inheritance from the current parent,
+which is not the original parent during a guarded mutation. Backup restoration
+must preserve the captured descriptor instead. Canonfig does not enable account
+privileges or request access to audit rules for this operation.
 
 Increasing the memory cap retains whole-file allocations and base64 expansion.
 Hard links are not backups of mutable files. Mandatory reflinks would restrict

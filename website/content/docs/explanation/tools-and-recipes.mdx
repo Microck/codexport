@@ -67,6 +67,19 @@ The package name and installation method are platform facts, not portable
 aliases. Do not infer a Windows package ID from an npm package name or copy a
 Homebrew formula into a Linux recipe.
 
+## Installed tool observation
+
+For command verification, `target` identifies the installed tool: a command
+name on `PATH` or a path to its entry file. Planning checks that target, not
+the first word of the verification command, which may be a shared runtime
+such as Node or Python. An `executable-present` verifier instead names the
+executable to check explicitly. `toolId` remains the portable resource identity.
+
+Planning does not run verification commands. Presence allows `ensure` to leave
+an existing installation in place; the declared verification still checks it
+during apply. A present entry file alone does not prove the expected version,
+working dependencies, or a signed-in session.
+
 ## Supported discovery methods
 
 Discovery can resolve deterministic metadata for npm, Homebrew, winget, uv,

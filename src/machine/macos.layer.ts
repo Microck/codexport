@@ -536,6 +536,8 @@ export const macosMachineStateLayer = (
           ),
         permissions: (path) =>
           requireMacosPath(path).pipe(Effect.flatMap(machine.permissions)),
+        snapshotPermissions: (path) =>
+          requireMacosPath(path).pipe(Effect.flatMap(machine.snapshotPermissions)),
         findExecutable: (query) => {
           const searchPath = query.searchPath?.map(linuxPath);
           return machine.findExecutable({ ...query, searchPath }).pipe(

@@ -1,20 +1,13 @@
-# Canonfig v3.1.0
+# Canonfig v3.1.1
 
-Canonfig 3.1.0 requires Node.js 24 or newer.
+Canonfig 3.1.1 requires Node.js 24 or newer.
 
-## Features
+## Bug Fixes
 
-- Add the opt-in `append-local` file policy for shared instructions such as
-  `AGENTS.md`. Canonfig updates a marked Source section and preserves the
-  follower's local text below it. Removing the resource removes only the Source
-  section. Existing file policies keep their behavior.
-- Add Simple and Advanced setup guidance, numbered configuration choices, and
-  opt-in Tailscale device discovery.
-- Add a harness-to-harness skill for importing supported agent configuration
-  into one canonical harness and projecting it to other supported targets.
+- Preserve existing parent and sibling permissions when writing files on
+  Windows. Protect new directories, staged content, and local credential
+  storage without changing unrelated files' access rules.
+- Support large files in rollback snapshots so synchronization can replace
+  them and restore their original contents if an apply fails.
 
-`append-local` supports regular, non-executable UTF-8 text files. Edits to the
-managed Source section are reported as drift. Recovery preserves local edits
-made after a failed apply and retains the snapshots needed for manual recovery.
-
-Full changelog: https://github.com/Microck/canonfig/compare/v3.0.1...v3.1.0
+Full changelog: https://github.com/Microck/canonfig/compare/v3.1.0...v3.1.1

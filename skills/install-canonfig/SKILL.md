@@ -17,7 +17,7 @@ security or human-action boundary.
    - macOS: [references/macos.md](references/macos.md)
    - Windows: [references/windows.md](references/windows.md)
 3. Confirm Node.js 24 or newer and npm are available.
-4. Install the exact `@microck/canonfig@3.1.0` package version. The installed
+4. Install the exact `@microck/canonfig@3.1.1` package version. The installed
    executable remains `canonfig`.
 5. Run `canonfig --version` and bounded diagnostics.
 6. Initialize a Source Machine **or** enroll a Follower Machine. Never initialize

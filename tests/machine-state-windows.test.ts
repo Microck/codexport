@@ -88,10 +88,7 @@ describe.skipIf(process.platform !== "win32")("Windows file permission ownership
       const sibling = join(root, "unmanaged.txt");
       const source = join(root, "source.txt");
       try {
-        await writeFile(sibling, "keep sibling");
-        await writeFile(source, "file-source content");
         const parentAcl = await inspectAcl(root);
-        const siblingAcl = await inspectAcl(sibling);
         if (parents.length > 0) {
           const failingAclEnvironment = Object.entries(process.env).flatMap(([name, value]) =>
             value === undefined || name === "CANONFIG_ICACLS" ? [] : [{ name, value }]
@@ -106,8 +103,11 @@ describe.skipIf(process.platform !== "win32")("Windows file permission ownership
           }).pipe(Effect.provide(windowsMachineStateLayer({
             environment: failingAclEnvironment,
           }))))).rejects.toThrow();
-          expect((await readdir(root)).sort()).toEqual(["source.txt", "unmanaged.txt"]);
+          expect(await readdir(root)).toEqual([]);
         }
+        await writeFile(sibling, "keep sibling");
+        await writeFile(source, "file-source content");
+        const siblingAcl = await inspectAcl(sibling);
         await Effect.runPromise(Effect.gen(function*() {
           const machine = yield* MachineState;
           const path = yield* machine.normalizePath({ path: target });

@@ -649,9 +649,14 @@ export const windowsMachineStateLayer = (
                 try: async () => {
                   // Remove only empty directories created by this call, so a
                   // retry cannot mistake an unprotected tree for an existing one.
-                  for (let directory = parent;; directory = win32.dirname(directory)) {
+                  // Native mkdir can return an extended (\\?\) Windows path.
+                  const cleanupRoot = win32.toNamespacedPath(createdParent);
+                  for (
+                    let directory = win32.toNamespacedPath(parent);;
+                    directory = win32.dirname(directory)
+                  ) {
                     await rmdir(directory);
-                    if (directory === createdParent) break;
+                    if (directory === cleanupRoot) break;
                   }
                 },
                 catch: (cause) =>

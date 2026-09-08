@@ -219,16 +219,19 @@ describe("shared-secret cleanup retry", () => {
     });
     const input = Buffer.from(command.standardInput).toString("utf8");
     expect(metadata).not.toContain(secret);
-    expect(command.arguments).toEqual(["-i"]);
+    expect(command.executable).toBe("/usr/bin/osascript");
+    expect(command.arguments.slice(0, 3)).toEqual(["-l", "JavaScript", "-e"]);
     expect(command.environment).toEqual([]);
     expect(input).not.toContain(secret);
     expect(input).toContain(Buffer.from(secret, "utf8").toString("hex"));
-    expect(input.endsWith("\n")).toBe(true);
+    expect(JSON.parse(input)).toMatchObject({ operation: "store" });
   });
 
   it.runIf(process.platform === "darwin").each([
     { label: "ASCII", secret: "macos-keychain-token-round-trip" },
     { label: "hex-looking", secret: "deadbeef1234" },
+    { label: "2000-byte", secret: "a".repeat(2000) },
+    { label: "16-KiB", secret: "a".repeat(16 * 1024) },
     { label: "multibyte", secret: "é🔐-macos-keychain-round-trip" },
     { label: "quoted multiline", secret: "quote \" and slash \\\nsecond line\n" },
   ])(

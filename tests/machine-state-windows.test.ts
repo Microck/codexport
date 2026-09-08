@@ -1,8 +1,14 @@
 import { mkdtempSync } from "node:fs";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { tmpdir } from "node:os";
+import { promisify } from "node:util";
 import { dirname, join } from "node:path";
 import { win32 } from "node:path";
 
 import { describe, expect, it } from "vitest";
+import { Effect } from "effect";
+import { MachineState } from "../src/machine/machine-state.service.ts";
 
 import {
   decodeWindowsTaskXml,
@@ -57,6 +63,50 @@ const environment = (root: string) => {
     { name: "SystemRoot", value: process.env.SystemRoot ?? "C:\\Windows" },
   ];
 };
+
+describe.skipIf(process.platform !== "win32")("Windows file permission ownership", () => {
+  it("preserves parent and sibling ACLs when publishing private file content", async () => {
+    const root = await mkdtemp(join(tmpdir(), "canonfig-file-permissions-"));
+    const target = join(root, "settings.json");
+    const sibling = join(root, "unmanaged.txt");
+    const source = join(root, "source.txt");
+    const powershell = join(process.env.SystemRoot ?? "C:\\Windows",
+      "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const inspectAcl = async (path: string) => {
+      const output = await promisify(execFile)(powershell, [
+        "-NoProfile", "-NonInteractive", "-Command",
+        "(Get-Acl -LiteralPath $env:CANONFIG_TEST_PATH).Sddl",
+      ], { env: { ...process.env, CANONFIG_TEST_PATH: path } });
+      return output.stdout.trim();
+    };
+    try {
+      await writeFile(sibling, "keep sibling");
+      await writeFile(source, "file-source content");
+      const parentAcl = await inspectAcl(root);
+      const siblingAcl = await inspectAcl(sibling);
+      await Effect.runPromise(Effect.gen(function*() {
+        const machine = yield* MachineState;
+        const path = yield* machine.normalizePath({ path: target });
+        yield* machine.atomicWrite({ path, content: Buffer.from("buffer content") });
+        expect(yield* Effect.promise(() => readFile(target, "utf8"))).toBe("buffer content");
+        const sourcePath = yield* machine.normalizePath({ path: source });
+        const digest = (yield* machine.digestFile({ path: sourcePath })).value;
+        yield* machine.atomicWrite({ path, content: { file: source, digest } });
+        expect(yield* Effect.promise(() => readFile(target, "utf8"))).toBe("file-source content");
+      }).pipe(Effect.provide(windowsMachineStateLayer())));
+      expect(await inspectAcl(root)).toBe(parentAcl);
+      expect(await inspectAcl(sibling)).toBe(siblingAcl);
+      expect(await readFile(sibling, "utf8")).toBe("keep sibling");
+      expect((await readdir(root)).sort()).toEqual(["settings.json", "source.txt", "unmanaged.txt"]);
+      const targetAcl = await inspectAcl(target);
+      // Protected DACLs do not regain inherited broad access on publication.
+      expect(targetAcl).toContain("D:P");
+      expect(targetAcl).not.toMatch(/;;;(?:WD|AU|BU)\)/u);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+});
 
 describe("Windows ACL command rendering", () => {
   it("renders shell-free current-user-only ACL arguments", () => {

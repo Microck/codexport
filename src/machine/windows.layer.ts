@@ -3,6 +3,7 @@ import {
   access,
   lstat,
   mkdir,
+  mkdtemp,
   open,
   readFile,
   realpath,
@@ -633,51 +634,60 @@ export const windowsMachineStateLayer = (
         mode: number,
       ): Effect.Effect<void, MachineStateError> => {
         const parent = win32.dirname(path);
-        const temporary = win32.join(
-          parent,
-          `.${win32.basename(path)}.canonfig-${randomBytes(12).toString("hex")}`,
-        );
         return Effect.gen(function*() {
-          yield* secureDirectory(parent, semanticModes.get(parent) ?? 0o700);
-          yield* Effect.tryPromise({
+          // A file resource does not own its existing parent or siblings. Restrict
+          // an empty staging directory before creating any content inside it.
+          const staging = yield* Effect.tryPromise({
             try: async () => {
-              let handle: Awaited<ReturnType<typeof open>> | undefined;
-              try {
-                handle = await open(temporary, "wx");
-                await writeFileContent(handle, content);
-                await handle.sync().catch((cause: NodeJS.ErrnoException) => {
-                  if (cause.code !== "EPERM" && cause.code !== "EINVAL") throw cause;
-                });
-                await handle.close();
-                handle = undefined;
-              } finally {
-                if (handle !== undefined) {
-                  await handle.close().catch(() => undefined);
-                }
-              }
+              await mkdir(parent, { recursive: true });
+              return mkdtemp(win32.join(parent, ".canonfig-write-"));
             },
-            catch: (cause) =>
-              filesystemFailure("atomically write Windows file", path, cause),
+            catch: (cause) => filesystemFailure("stage Windows file", path, cause),
           });
-          yield* setPrivateAcl(temporary, false);
-          yield* Effect.tryPromise({
-            try: () => prepareWindowsManagedLeafKind(path, "non-directory"),
-            catch: (cause) =>
-              filesystemFailure("prepare Windows file replacement", path, cause),
-          });
-          yield* Effect.tryPromise({
-            try: () => rename(temporary, path),
-            catch: (cause) =>
-              filesystemFailure("replace Windows file", path, cause),
-          });
-          yield* setPrivateAcl(path, false);
-          yield* writeSemanticMode(path, mode);
-        }).pipe(
-          Effect.ensuring(Effect.promise(() =>
-            rm(temporary, { force: true }).catch(() => undefined)
-          )),
-          Effect.uninterruptible,
-        );
+          const temporary = win32.join(staging, "content");
+          yield* Effect.gen(function*() {
+            yield* setPrivateAcl(staging, true);
+            yield* Effect.tryPromise({
+              try: async () => {
+                let handle: Awaited<ReturnType<typeof open>> | undefined;
+                try {
+                  handle = await open(temporary, "wx");
+                  await writeFileContent(handle, content);
+                  await handle.sync().catch((cause: NodeJS.ErrnoException) => {
+                    if (cause.code !== "EPERM" && cause.code !== "EINVAL") throw cause;
+                  });
+                  await handle.close();
+                  handle = undefined;
+                } finally {
+                  if (handle !== undefined) {
+                    await handle.close().catch(() => undefined);
+                  }
+                }
+              },
+              catch: (cause) =>
+                filesystemFailure("atomically write Windows file", path, cause),
+            });
+            yield* setPrivateAcl(temporary, false);
+            yield* Effect.tryPromise({
+              try: () => prepareWindowsManagedLeafKind(path, "non-directory"),
+              catch: (cause) =>
+                filesystemFailure("prepare Windows file replacement", path, cause),
+            });
+            yield* Effect.tryPromise({
+              try: () => rename(temporary, path),
+              catch: (cause) =>
+                filesystemFailure("replace Windows file", path, cause),
+            });
+            yield* setPrivateAcl(path, false);
+            yield* writeSemanticMode(path, mode);
+          }).pipe(
+            Effect.ensuring(Effect.promise(() =>
+              rm(temporary, { force: true }).catch(() => undefined).then(() =>
+                rmdir(staging).catch(() => undefined)
+              )
+            )),
+          );
+        }).pipe(Effect.uninterruptible);
       };
       const isWithinRoot = (root: string, candidate: string): boolean => {
         const remainder = win32.relative(root.toLowerCase(), candidate.toLowerCase());

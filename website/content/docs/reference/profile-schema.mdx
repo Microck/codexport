@@ -72,6 +72,9 @@ the desired subtree. `mirror-owned` is the policy that preserves foreign
 entries. Parent directories required by desired files remain even when the
 profile does not list those directories explicitly. These implicit parents do
 not create drift or prevent the next unchanged synchronization from being a no-op.
+For `replace-if-unmodified` skills, this also applies when comparing the observed
+tree with the last applied tree. Source-only changes remain safe to apply;
+local file edits and changes to explicitly declared directories remain drift.
 
 A `tool` may declare `agentInstall`, which is what permits a bounded
 Configuration Agent to install it:

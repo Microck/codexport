@@ -1,0 +1,98 @@
+/*
+ * Ender Chest — Fumadocs UI theme for Tailwind CSS v4.
+ *
+ * Save beside your global stylesheet and use these imports there:
+ *
+ *   @import "tailwindcss";
+ *   @import "./ender-chest.css";
+ *   @import "fumadocs-ui/css/preset.css";
+ *
+ * Replace your existing Fumadocs color-theme import (neutral.css, etc.).
+ * Do not keep another color theme or shadcn.css alongside this one.
+ * Dark mode provides the chest palette; light mode is a coordinated variant.
+ * No layout, font, or syntax-highlighting rules are changed.
+ *
+ * Theme API: https://www.fumadocs.dev/docs/ui/theme
+ */
+
+:root {
+  /* Light mode: pale stone, forest green, and aged brass. */
+  --color-fd-background: #f3f6f1;
+  --color-fd-foreground: #132523;
+
+  --color-fd-muted: #e4ebe3;
+  --color-fd-muted-foreground: #536b64;
+
+  --color-fd-popover: #fafcf8;
+  --color-fd-popover-foreground: #132523;
+
+  --color-fd-card: #edf2eb;
+  --color-fd-card-foreground: #132523;
+
+  --color-fd-border: #c9d6cc;
+
+  --color-fd-primary: #356641;
+  --color-fd-primary-foreground: #f7fbf5;
+
+  --color-fd-secondary: #e0e9df;
+  --color-fd-secondary-foreground: #284237;
+
+  --color-fd-accent: #dceada;
+  --color-fd-accent-foreground: #254f32;
+
+  --color-fd-ring: #7c3aed;
+
+  /* Extra Tailwind utilities for custom CTAs and decoration.
+   * Gold button: bg-ender-gold text-ender-gold-foreground
+   *              hover:bg-ender-gold-hover
+   * Decorative portal accent: bg-ender-portal
+   */
+  --color-ender-gold: #f1c332;
+  --color-ender-gold-hover: #f9e37a;
+  --color-ender-gold-foreground: #201b08;
+  --color-ender-portal: #8b5cf6;
+}
+
+.dark {
+  /* Dark mode: obsidian, deep teal, and Ender green. */
+  --color-fd-background: #0b0f10;
+  --color-fd-foreground: #e5eee9;
+
+  --color-fd-muted: #182728;
+  /* Brighter than the reference's gray for readable secondary text. */
+  --color-fd-muted-foreground: #9ab0aa;
+
+  --color-fd-popover: #142122;
+  --color-fd-popover-foreground: #e5eee9;
+
+  --color-fd-card: #121e1f;
+  --color-fd-card-foreground: #e5eee9;
+
+  --color-fd-border: #334646;
+
+  --color-fd-primary: #7aae7a;
+  --color-fd-primary-foreground: #0b1510;
+
+  --color-fd-secondary: #1f2e2f;
+  --color-fd-secondary-foreground: #dce8df;
+
+  --color-fd-accent: #213a2e;
+  --color-fd-accent-foreground: #a7dda0;
+
+  --color-fd-ring: #a78bfa;
+}
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  .dark {
+    color-scheme: dark;
+  }
+
+  ::selection {
+    background-color: var(--color-fd-primary);
+    color: var(--color-fd-primary-foreground);
+  }
+}

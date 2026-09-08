@@ -1,64 +1,13 @@
+@import "./ender-chest.css";
+
 :root, .dark {
-  --color-fd-background: #000;
-  --color-fd-foreground: #fff;
-  --color-fd-card: #000;
-  --color-fd-card-foreground: #fff;
-  --color-fd-popover: #000;
-  --color-fd-popover-foreground: #fff;
-  --color-fd-primary: #e4d042;
-  --color-fd-primary-foreground: #151200;
-  --color-fd-muted: #060f0f;
-  --color-fd-muted-foreground: #9ac0c0;
-  --color-fd-accent: #060f0f;
-  --color-fd-accent-foreground: #fff;
-  --color-fd-secondary: #0a1e1f;
-  --color-fd-secondary-foreground: #fff;
-  --color-fd-border: #1a2d2d;
-  --color-fd-input: #172728;
-  --color-fd-ring: #e4d042;
-  --canonfig-accent: #e4d042;
-  --canonfig-surface: #000;
-  --canonfig-code: #0a1e1f;
+  --color-fd-input: var(--color-fd-border);
+  --canonfig-accent: var(--color-ender-gold);
+  --canonfig-surface: var(--color-fd-background);
+  --canonfig-code: var(--color-fd-secondary);
 
   --animation-duration: 0ms !important;
   --transition-duration: 0ms !important;
-}
-
-@supports (color: oklch(0 0 0)) {
-  :root, .dark {
-    --color-fd-background: oklch(0 0 0);
-    --color-fd-foreground: oklch(1 0 0);
-    --color-fd-card: oklch(0 0 0);
-    --color-fd-card-foreground: oklch(1 0 0);
-    --color-fd-popover: oklch(0 0 0);
-    --color-fd-popover-foreground: oklch(1 0 0);
-    /* Logo latch hue 100.8. L lifted past 0.75 so gold reads on true black. */
-    --color-fd-primary: oklch(0.85 0.156 100.8);
-    --color-fd-primary-foreground: oklch(0.18 0.04 100.8);
-    /* Logo chest hue 196.4. Surfaces, not interactive. */
-    --color-fd-muted: oklch(0.16 0.015 196.4);
-    --color-fd-muted-foreground: oklch(0.78 0.04 196.4);
-    --color-fd-accent: oklch(0.16 0.015 196.4);
-    --color-fd-accent-foreground: oklch(1 0 0);
-    --color-fd-secondary: oklch(0.22 0.026 196.4);
-    --color-fd-secondary-foreground: oklch(1 0 0);
-    --color-fd-border: oklch(0.28 0.024 196.4);
-    --color-fd-input: oklch(0.26 0.022 196.4);
-    --color-fd-ring: oklch(0.85 0.156 100.8);
-    --canonfig-accent: oklch(0.85 0.156 100.8);
-    --canonfig-surface: oklch(0 0 0);
-    --canonfig-code: oklch(0.22 0.026 196.4);
-  }
-}
-
-@media (color-gamut: p3) {
-  @supports (color: oklch(0 0 0)) {
-    :root, .dark {
-      --color-fd-primary: oklch(0.85 0.181 100.8);
-      --color-fd-ring: oklch(0.85 0.181 100.8);
-      --canonfig-accent: oklch(0.85 0.181 100.8);
-    }
-  }
 }
 
 body {

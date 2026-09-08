@@ -361,7 +361,7 @@ describe("resource and Apply Policy coverage", () => {
     "preserves implicit parent directories when replacing a %s",
     (kind) => {
       const subject = resource("tree", kind, "replace");
-      const plan = runPlan(plannerInput([subject], {
+      const input = plannerInput([subject], {
         desired: [{
           kind,
           digest: digestA,
@@ -378,12 +378,31 @@ describe("resource and Apply Policy coverage", () => {
             { path: "obsolete/drop.md", digest: digestB, objectKind: "regular" },
           ],
         }],
-      }));
+      });
+      const plan = runPlan(input);
       expect(plan.actions[0]?.detail).toMatchObject({
         kind: "mirror-directory",
         adds: ["references/nested/keep.md"],
         removes: ["obsolete", "obsolete/drop.md"],
       });
+      const converged = runPlan({
+        ...input,
+        observedState: {
+          ...input.observedState,
+          resources: [{
+            resource: subject.id,
+            observed: {
+              state: "directory",
+              files: [
+                { path: "references", digest: sha256Hex("canonfig:directory"), objectKind: "directory" },
+                { path: "references/nested", digest: sha256Hex("canonfig:directory"), objectKind: "directory" },
+                { path: "references/nested/keep.md", digest: digestA, objectKind: "regular" },
+              ],
+            },
+          }],
+        },
+      });
+      expect(converged.actions.map((action) => action.kind)).toEqual(["no-op"]);
     },
   );
 

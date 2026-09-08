@@ -233,12 +233,20 @@ const observedMatchesDesired = (
         && observed.digest === desired.digest
         && (observedObjectKind === undefined || observedObjectKind === "regular");
     case "directory":
-    case "skill":
+    case "skill": {
+      const desiredEntries = desiredDirectoryEntries(desired);
+      const desiredPaths = new Set(desiredEntries.map((file) => file.path));
+      const desiredAncestorPaths = relativePathAncestors([...desiredPaths]);
       return observed.state === "directory"
         && (observed.objectKind === undefined || observed.objectKind === "directory")
         && observed.mode === desired.mode
         && observed.files.every((file) => !("state" in file))
-        && directoryEntriesDigest(presentObservedFiles(observed.files)) === desiredResourceDigest(desired);
+        && directoryEntriesDigest(presentObservedFiles(observed.files).filter((file) =>
+          desiredPaths.has(file.path)
+          || file.objectKind !== "directory"
+          || !desiredAncestorPaths.has(file.path)
+        )) === directoryEntriesDigest(desiredEntries);
+    }
     case "tool":
     case "credential":
       return observed.state === "present";

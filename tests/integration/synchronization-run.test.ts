@@ -3450,6 +3450,76 @@ if (process.argv.slice(2).some((value) =>
     expect(fallback.invocations[0]?.arguments).toContain("tool@1.2.3");
   });
 
+  it("installs a verified artifact with real npm without ambient config or lifecycle scripts", async () => {
+    const root = temporaryDirectory();
+    const npmCli = process.env.npm_execpath;
+    if (npmCli === undefined) throw new Error("run this integration suite through npm test");
+    const home = join(root, "home");
+    const bin = join(root, "bin");
+    const prefix = join(root, "prefix");
+    const configDirectory = join(home, ".cache", "canonfig", "npm-config");
+    const marker = join(root, "script-ran");
+    const artifactPath = join(home, ".cache", "canonfig", "npm-artifacts", "tool.tgz");
+    const source = "https://registry.npmjs.org/tool/-/tool-1.2.3.tgz";
+    const artifactBytes = npmTarballBytes({ name: "tool", version: "1.2.3", scripts: {
+      postinstall: `node -e "require('node:fs').writeFileSync('${marker}', 'unexpected')"`,
+    } });
+    const integrity = `sha512-${createHash("sha512").update(artifactBytes).digest("base64")}`;
+    await mkdir(bin, { recursive: true });
+    await mkdir(configDirectory, { recursive: true });
+    await mkdir(dirname(artifactPath), { recursive: true });
+    await writeFile(artifactPath, artifactBytes);
+    const hostileConfig = "global=false\ndry-run=true\nignore-scripts=false\n";
+    await writeFile(join(home, ".npmrc"), hostileConfig);
+    for (const level of ["user", "global"]) {
+      await writeFile(join(configDirectory, `${level}.npmrc`), hostileConfig);
+    }
+    // Forward to the actual npm CLI, confining its output and cache to this fixture.
+    await writeFile(join(bin, "npm"), `#!${process.execPath}
+const { spawnSync } = require('node:child_process');
+const child = spawnSync(${JSON.stringify(process.execPath)}, [
+  ${JSON.stringify(npmCli)}, ...process.argv.slice(2),
+  '--prefix', ${JSON.stringify(prefix)}, '--cache', ${JSON.stringify(join(root, "npm-cache"))}
+], { env: process.env, stdio: 'inherit' });
+process.exit(child.status ?? 1);
+`);
+    chmodSync(join(bin, "npm"), 0o755);
+    const machine = linuxMachineStateLayer({ environment: [
+      { name: "HOME", value: home },
+      { name: "PATH", value: `${bin}:${dirname(process.execPath)}` },
+      { name: "NPM_CONFIG_DRY_RUN", value: "true" },
+      { name: "NPM_CONFIG_USERCONFIG", value: join(home, ".npmrc") },
+      { name: "NPM_CONFIG_GLOBALCONFIG", value: join(home, ".npmrc") },
+    ] });
+    const id = decode(ResourceId)("tool");
+    const context: ResourceExecutionContext = {
+      run: decode(RunId)("run-real-npm"),
+      action: { id: decode(ActionId)("action:tool:install-npm"), resource: id,
+        kind: "install-tool", before: [], detail: {
+          kind: "install-tool", toolId: "tool", method: "npm", package: "tool",
+          version: "1.2.3", source: { source, integrity },
+        } },
+      resource: { id, kind: "tool", target: "tool", policy: "ensure", dependsOn: [], blobs: [] },
+      desired: { kind: "tool", toolId: "tool", recipes: [], loginRequired: false },
+      verification: { method: "executable-present", executable: "tool" },
+      artifacts: new Map(), limits: defaultSynchronizationExecutionLimits,
+      npmArtifactTransport: { download: () => Effect.succeed({
+        path: artifactPath, bytes: artifactBytes.byteLength, source, integrity,
+      }) },
+    };
+    await Effect.runPromise(Effect.gen(function*() {
+      const prepared = yield* prepareResourceAction(context);
+      yield* prepared.execute;
+    }).pipe(Effect.provide(machine)));
+    expect(JSON.parse(await readFile(join(prefix, "lib", "node_modules", "tool", "package.json"), "utf8")))
+      .toMatchObject({ name: "tool", version: "1.2.3" });
+    await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(join(home, ".npmrc"), "utf8")).toBe(hostileConfig);
+    for (const level of ["user", "global"]) {
+      expect(await readFile(join(configDirectory, `${level}.npmrc`), "utf8")).toBe("");
+    }
+  });
+
   it("uses offline mode for pnpm reviewed local artifacts", async () => {
     const artifact = "https://registry.npmjs.org/tool/-/tool-1.2.3.tgz";
     const artifactBytes = npmTarballBytes({ name: "tool", version: "1.2.3" });

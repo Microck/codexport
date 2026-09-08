@@ -43,7 +43,7 @@ export class MachineState extends Context.Service<MachineState, {
   readonly ensureDirectory: (
     input: EnsureDirectoryInput,
   ) => Effect.Effect<void, MachineStateError>;
-  /** Protect content and new parent directories; preserve existing parent and sibling permissions. */
+  /** Publish protected content and new parents; preserve existing parent and sibling permissions. */
   readonly atomicWrite: (
     input: AtomicWriteInput,
   ) => Effect.Effect<void, MachineStateError>;

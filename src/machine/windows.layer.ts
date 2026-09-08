@@ -628,6 +628,38 @@ export const windowsMachineStateLayer = (
           Effect.andThen(setPrivateAcl(path, true)),
           Effect.andThen(writeSemanticMode(path, mode)),
         );
+      const ensureFileParent = (
+        parent: string,
+      ): Effect.Effect<void, MachineStateError> => Effect.gen(function*() {
+        const missing = yield* Effect.tryPromise({
+          try: async () => {
+            try {
+              await stat(parent);
+              return false;
+            } catch (cause) {
+              if (errorCode(cause) === "ENOENT" && win32.dirname(parent) !== parent) return true;
+              throw cause;
+            }
+          },
+          catch: (cause) => filesystemFailure("inspect Windows file parent", parent, cause),
+        });
+        if (!missing) return;
+        const ancestor = win32.dirname(parent);
+        yield* ensureFileParent(ancestor);
+        const staging = yield* Effect.tryPromise({
+          try: () => mkdtemp(win32.join(ancestor, ".canonfig-directory-")),
+          catch: (cause) => filesystemFailure("stage Windows directory", parent, cause),
+        });
+        // A new parent becomes visible at its final path only after protection.
+        // Concurrent creators may fail at rename, but cannot use an unprotected parent.
+        yield* setPrivateAcl(staging, true).pipe(
+          Effect.andThen(Effect.tryPromise({
+            try: () => rename(staging, parent),
+            catch: (cause) => filesystemFailure("publish Windows directory", parent, cause),
+          })),
+          Effect.ensuring(Effect.promise(() => rmdir(staging).catch(() => undefined))),
+        );
+      });
       const secureAtomicWrite = (
         path: string,
         content: FileContent,
@@ -637,33 +669,7 @@ export const windowsMachineStateLayer = (
         return Effect.gen(function*() {
           // A file resource does not own its existing parent or siblings. Restrict
           // an empty staging directory before creating any content inside it.
-          const createdParent = yield* Effect.tryPromise({
-            try: () => mkdir(parent, { recursive: true }),
-            catch: (cause) => filesystemFailure("ensure Windows file parent", path, cause),
-          });
-          // mkdir reports the first directory it created. Its inheritable ACL
-          // protects the new subtree without changing the existing ancestor.
-          if (createdParent !== undefined) {
-            yield* setPrivateAcl(createdParent, true).pipe(
-              Effect.tapError(() => Effect.tryPromise({
-                try: async () => {
-                  // Remove only empty directories created by this call, so a
-                  // retry cannot mistake an unprotected tree for an existing one.
-                  // Native mkdir can return an extended (\\?\) Windows path.
-                  const cleanupRoot = win32.toNamespacedPath(createdParent);
-                  for (
-                    let directory = win32.toNamespacedPath(parent);;
-                    directory = win32.dirname(directory)
-                  ) {
-                    await rmdir(directory);
-                    if (directory === cleanupRoot) break;
-                  }
-                },
-                catch: (cause) =>
-                  filesystemFailure("remove unprotected Windows parent", createdParent, cause),
-              })),
-            );
-          }
+          yield* ensureFileParent(parent);
           const staging = yield* Effect.tryPromise({
             try: () => mkdtemp(win32.join(parent, ".canonfig-write-")),
             catch: (cause) => filesystemFailure("stage Windows file", path, cause),

@@ -451,7 +451,7 @@ describe("packed Canonfig executable", () => {
     const version = invoke(followerHome, ["--version"]);
     expect(help).toMatchObject({ status: 0, stderr: "" });
     expect(help.stdout).toContain("Usage: canonfig");
-    expect(version).toEqual({ status: 0, stdout: "3.1.1\n", stderr: "" });
+    expect(version).toEqual({ status: 0, stdout: "3.1.2\n", stderr: "" });
   });
 
   it("runs representative safe routes with stable JSON", () => {

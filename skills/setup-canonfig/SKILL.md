@@ -172,7 +172,7 @@ Read the selected branch and execute only approved stages. Node.js 24 or newer
 and npm are required; the documented package for this revision is:
 
 ```bash
-npm install --global @microck/canonfig@3.1.1
+npm install --global @microck/canonfig@3.1.2
 canonfig --version
 canonfig doctor --no-input --timeout-ms 5000
 ```

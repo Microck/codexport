@@ -93,6 +93,14 @@ subpaths remain intact. Without that policy, Canonfig uses the fixed
 the full approved `--default-index`, exact package versions, and
 `--only-binary=:all:` under the default build policy.
 
+## npm configuration isolation
+
+Automatic npm-family installs ignore inherited package-manager configuration.
+Canonfig resets separate user and global npm config files to empty content in
+its cache before each install. The two paths must differ because npm rejects
+loading one path at both configuration levels. These files contain no credentials
+and are reusable cache material, not user settings.
+
 ## Login requirements
 
 A recipe may declare that login is required and provide non-secret instructions.

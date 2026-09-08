@@ -1479,6 +1479,23 @@ const installInvocation = (
       : effectiveVersion === undefined
       ? packageName
       : `${packageName}@${effectiveVersion}`;
+    const npmConfiguration: Array<{ name: string; value: string }> = [];
+    if (npmFamily) {
+      const directories = yield* machine.userDirectories();
+      const configDirectory = yield* machine.normalizePath({
+        path: join(directories.cache.absolute, "canonfig", "npm-config"),
+      });
+      yield* machine.ensureDirectory({ path: configDirectory });
+      // npm rejects loading the same path as both user and global config.
+      // Reset these owned cache files so prior contents cannot affect an install.
+      for (const level of ["user", "global"]) {
+        const path = yield* machine.normalizePath({
+          path: join(configDirectory.absolute, `${level}.npmrc`),
+        });
+        yield* machine.atomicWrite({ path, content: new Uint8Array(), mode: 0o600 });
+        npmConfiguration.push({ name: `NPM_CONFIG_${level.toUpperCase()}CONFIG`, value: path.absolute });
+      }
+    }
     const packageEnvironment = method === "uv"
       ? [
         { name: "UV_CONFIG_FILE", value: process.platform === "win32" ? "NUL" : "/dev/null" },
@@ -1489,8 +1506,7 @@ const installInvocation = (
       ]
       : method === "npm" || method === "pnpm" || method === "bun"
       ? [
-        { name: "NPM_CONFIG_USERCONFIG", value: process.platform === "win32" ? "NUL" : "/dev/null" },
-        { name: "NPM_CONFIG_GLOBALCONFIG", value: process.platform === "win32" ? "NUL" : "/dev/null" },
+        ...npmConfiguration,
         { name: "NPM_CONFIG_LOCATION", value: "global" },
         { name: "NPM_CONFIG_REGISTRY", value: "https://registry.npmjs.org/" },
         ...(verifiedArtifactPath !== undefined

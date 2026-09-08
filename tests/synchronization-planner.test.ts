@@ -357,6 +357,36 @@ describe("resource and Apply Policy coverage", () => {
     expect(plan.actions.map((action) => action.kind)).toEqual(["drift-conflict"]);
   });
 
+  it.each(["directory", "skill"] as const)(
+    "preserves implicit parent directories when replacing a %s",
+    (kind) => {
+      const subject = resource("tree", kind, "replace");
+      const plan = runPlan(plannerInput([subject], {
+        desired: [{
+          kind,
+          digest: digestA,
+          directories: [],
+          files: [{ path: "references/nested/keep.md", digest: digestA }],
+        }],
+        observed: [{
+          state: "directory",
+          files: [
+            { path: "references", digest: sha256Hex("canonfig:directory"), objectKind: "directory" },
+            { path: "references/nested", digest: sha256Hex("canonfig:directory"), objectKind: "directory" },
+            { path: "references/nested/keep.md", digest: digestB, objectKind: "regular" },
+            { path: "obsolete", digest: sha256Hex("canonfig:directory"), objectKind: "directory" },
+            { path: "obsolete/drop.md", digest: digestB, objectKind: "regular" },
+          ],
+        }],
+      }));
+      expect(plan.actions[0]?.detail).toMatchObject({
+        kind: "mirror-directory",
+        adds: ["references/nested/keep.md"],
+        removes: ["obsolete", "obsolete/drop.md"],
+      });
+    },
+  );
+
   it("treats an exact relative symlink as converged", () => {
     const subject = resource("directory", "directory", "mirror-owned");
     const desired = {

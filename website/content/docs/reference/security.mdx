@@ -70,6 +70,12 @@ storage. The JSON manifest contains only names, origins, and opaque credential
 references; the ordinary state database and profile revisions contain no shared
 secret values.
 
+On macOS, shared credentials use a versioned `keychain-hex:` reference. The
+Keychain item stores the UTF-8 value as ASCII hex text, and the reader decodes
+that text once. The native writer passes this text through stdin without
+asking `security` to decode it during storage. This preserves ordinary tokens,
+hex-looking values, Unicode, quotes, and line breaks under one representation.
+
 Followers do not re-share source-origin values. Source deletions retire
 source-owned follower credentials on the next apply. Unauthorized requests are
 indistinguishable from unknown routes, and each value is limited to 16 KiB of

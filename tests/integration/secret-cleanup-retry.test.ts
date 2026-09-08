@@ -226,10 +226,14 @@ describe("shared-secret cleanup retry", () => {
     expect(input.endsWith("\n")).toBe(true);
   });
 
-  it.runIf(process.platform === "darwin")(
-    "round-trips a multibyte secret through macOS Keychain stdin",
-    async () => {
-      const secret = "é🔐-macos-keychain-round-trip";
+  it.runIf(process.platform === "darwin").each([
+    { label: "ASCII", secret: "macos-keychain-token-round-trip" },
+    { label: "hex-looking", secret: "deadbeef1234" },
+    { label: "multibyte", secret: "é🔐-macos-keychain-round-trip" },
+    { label: "quoted multiline", secret: "quote \" and slash \\\nsecond line\n" },
+  ])(
+    "round-trips a $label secret through macOS Keychain stdin",
+    async ({ secret }) => {
       const name = `canonfig-native-secret-${randomUUID()}`;
       const layer = nativeSecretStoreLayer(
         macosMachineStateLayer({

@@ -69,7 +69,8 @@ Overlay stays, which is how an operator keeps a key the profile has dropped.
 `replace` on a directory is a true mirror: the whole directory is listed, and
 entries Canonfig never wrote are removed so the managed subtree ends up exactly
 the desired subtree. `mirror-owned` is the policy that preserves foreign
-entries.
+entries. Parent directories required by desired files remain even when the
+profile does not list those directories explicitly.
 
 A `tool` may declare `agentInstall`, which is what permits a bounded
 Configuration Agent to install it:

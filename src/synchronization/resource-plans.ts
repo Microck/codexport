@@ -332,6 +332,7 @@ const replaceDirectory = (
   );
   const desiredEntries = desiredDirectoryEntries(desired);
   const desiredPaths = new Set(desiredEntries.map((file) => file.path));
+  const desiredAncestorPaths = relativePathAncestors([...desiredPaths]);
   return {
     kind: "mirror-directory",
     detail: {
@@ -345,7 +346,10 @@ const replaceDirectory = (
         .map((file) => file.path)
         .sort(compareText),
       removes: observedFiles
-        .filter((file) => !desiredPaths.has(file.path))
+        .filter((file) =>
+          !desiredPaths.has(file.path)
+          && !(file.objectKind === "directory" && desiredAncestorPaths.has(file.path))
+        )
         .map((file) => file.path)
         .sort(compareText),
     },

@@ -121,7 +121,7 @@ export const nativeCredentialWriteCommand = (
       arguments: ["-i"],
       environment: [],
       standardInput: new TextEncoder().encode(
-        `add-generic-password -U -a canonfig -s dev.canonfig.${key} -X ${hexadecimalValue}\n`,
+        `add-generic-password -U -a canonfig -s dev.canonfig.${key} -w ${hexadecimalValue}\n`,
       ),
       reference: decode(CredentialReference)(`${keychainHexPrefix}${key}`),
     };

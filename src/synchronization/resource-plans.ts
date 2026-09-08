@@ -809,28 +809,11 @@ const planReplaceIfUnmodified = (
             : undefined,
         )];
     case "remote-only":
-      if (context.desired.kind === "skill") {
-        return [replaceDirectory(context, context.desired)];
-      }
-      return [
-        writeFile(
-          context,
-          desiredDigest,
-          context.desired.kind === "file" ? context.desired.executable : undefined,
-          context.desired.kind === "file" ? context.desired.mode : undefined,
-        ),
-      ];
+      return planReplace(context);
     case "local-only":
     case "conflicting":
       if (currentDigest === undefined) {
-        return [
-          writeFile(
-            context,
-            desiredDigest,
-            context.desired.kind === "file" ? context.desired.executable : undefined,
-            context.desired.kind === "file" ? context.desired.mode : undefined,
-          ),
-        ];
+        return planReplace(context);
       }
       return [driftConflict(
         context,

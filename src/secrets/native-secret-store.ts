@@ -22,6 +22,37 @@ const credentialTimeoutMilliseconds = 5_000;
 const keychainHexPrefix = "keychain-hex:";
 const decode = Schema.decodeUnknownSync;
 
+// SecurityTool's interactive input is limited to 4 KiB. The native framework
+// accepts the full secret over stdin; the same host reads its Keychain items.
+// Core Foundation constants must become Objective-C objects before dictionary use.
+const keychainArguments = ["-l", "JavaScript", "-e", [
+  "ObjC.import('Foundation');",
+  "ObjC.import('Security');",
+  "function run() {",
+  "  const bytes = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;",
+  "  const payload = JSON.parse(ObjC.unwrap($.NSString.alloc.initWithDataEncoding(bytes, $.NSUTF8StringEncoding)));",
+  "  const query = $.NSMutableDictionary.dictionary;",
+  "  query.setObjectForKey(ObjC.castRefToObject($.kSecClassGenericPassword), ObjC.castRefToObject($.kSecClass));",
+  "  query.setObjectForKey($(payload.service), ObjC.castRefToObject($.kSecAttrService));",
+  "  query.setObjectForKey($('canonfig'), ObjC.castRefToObject($.kSecAttrAccount));",
+  "  if (payload.operation === 'load') {",
+  "    query.setObjectForKey($.NSNumber.numberWithBool(true), ObjC.castRefToObject($.kSecReturnData));",
+  "    const output = Ref();",
+  "    const status = $.SecItemCopyMatching(query, output);",
+  "    if (status !== 0) throw Error('Keychain read failed: ' + status);",
+  "    return ObjC.unwrap($.NSString.alloc.initWithDataEncoding(ObjC.castRefToObject(output[0]), $.NSUTF8StringEncoding));",
+  "  }",
+  "  const attributes = $.NSMutableDictionary.dictionary;",
+  "  attributes.setObjectForKey($(payload.hexadecimal).dataUsingEncoding($.NSUTF8StringEncoding), ObjC.castRefToObject($.kSecValueData));",
+  "  let status = $.SecItemUpdate(query, attributes);",
+  "  if (status === -25300) { // errSecItemNotFound",
+  "    query.addEntriesFromDictionary(attributes);",
+  "    status = $.SecItemAdd(query, null);",
+  "  }",
+  "  if (status !== 0) throw Error('Keychain write failed: ' + status);",
+  "}",
+].join("\n")];
+
 export interface NativeCredentialWriteCommand {
   readonly provider: "keychain" | "credential-manager";
   readonly executable: string;
@@ -117,11 +148,11 @@ export const nativeCredentialWriteCommand = (
     const hexadecimalValue = Buffer.from(value, "utf8").toString("hex");
     return {
       provider: "keychain",
-      executable: "/usr/bin/security",
-      arguments: ["-i"],
+      executable: "/usr/bin/osascript",
+      arguments: keychainArguments,
       environment: [],
       standardInput: new TextEncoder().encode(
-        `add-generic-password -U -a canonfig -s dev.canonfig.${key} -X ${hexadecimalValue}\n`,
+        JSON.stringify({ operation: "store", service: `dev.canonfig.${key}`, hexadecimal: hexadecimalValue }),
       ),
       reference: decode(CredentialReference)(`${keychainHexPrefix}${key}`),
     };
@@ -198,11 +229,31 @@ export const nativeSecretStoreLayer = (
           return command.reference;
         }),
       loadCredential: (input: LoadCredentialInput) => {
-        const storageReference = keychainStorageReference(input.reference);
-        if (storageReference === undefined) return machine.loadCredential(input);
-        return machine.loadCredential({ reference: storageReference }).pipe(
-          Effect.flatMap((value) => decodeKeychainValue(input, value)),
-        );
+        const reference = String(input.reference);
+        if (!reference.startsWith(keychainHexPrefix)) return machine.loadCredential(input);
+        return Effect.gen(function*() {
+          const executable = yield* machine.normalizePath({ path: "/usr/bin/osascript" });
+          const loaded = yield* machine.runProcess({
+            executable,
+            arguments: keychainArguments,
+            standardInput: new TextEncoder().encode(JSON.stringify({
+              operation: "load",
+              service: `dev.canonfig.${reference.slice(keychainHexPrefix.length)}`,
+            })),
+            timeoutMilliseconds: credentialTimeoutMilliseconds,
+            maximumOutputBytes: maximumCredentialOutputBytes,
+          });
+          if (loaded.exitCode !== 0) {
+            return yield* new CredentialStorageError({
+              operation: "load credential",
+              reference: String(input.reference),
+              message: "the Keychain credential is unavailable",
+            });
+          }
+          return yield* decodeKeychainValue(input, Redacted.make(
+            new TextDecoder().decode(loaded.standardOutput).trim(),
+          ));
+        });
       },
       removeCredential: (reference: typeof CredentialReference.Type) => {
         const storageReference = keychainStorageReference(reference);

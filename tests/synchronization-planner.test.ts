@@ -357,6 +357,55 @@ describe("resource and Apply Policy coverage", () => {
     expect(plan.actions.map((action) => action.kind)).toEqual(["drift-conflict"]);
   });
 
+  it.each(["directory", "skill"] as const)(
+    "preserves implicit parent directories when replacing a %s",
+    (kind) => {
+      const subject = resource("tree", kind, "replace");
+      const input = plannerInput([subject], {
+        desired: [{
+          kind,
+          digest: digestA,
+          directories: [],
+          files: [{ path: "references/nested/keep.md", digest: digestA }],
+        }],
+        observed: [{
+          state: "directory",
+          files: [
+            { path: "references", digest: sha256Hex("canonfig:directory"), objectKind: "directory" },
+            { path: "references/nested", digest: sha256Hex("canonfig:directory"), objectKind: "directory" },
+            { path: "references/nested/keep.md", digest: digestB, objectKind: "regular" },
+            { path: "obsolete", digest: sha256Hex("canonfig:directory"), objectKind: "directory" },
+            { path: "obsolete/drop.md", digest: digestB, objectKind: "regular" },
+          ],
+        }],
+      });
+      const plan = runPlan(input);
+      expect(plan.actions[0]?.detail).toMatchObject({
+        kind: "mirror-directory",
+        adds: ["references/nested/keep.md"],
+        removes: ["obsolete", "obsolete/drop.md"],
+      });
+      const converged = runPlan({
+        ...input,
+        observedState: {
+          ...input.observedState,
+          resources: [{
+            resource: subject.id,
+            observed: {
+              state: "directory",
+              files: [
+                { path: "references", digest: sha256Hex("canonfig:directory"), objectKind: "directory" },
+                { path: "references/nested", digest: sha256Hex("canonfig:directory"), objectKind: "directory" },
+                { path: "references/nested/keep.md", digest: digestA, objectKind: "regular" },
+              ],
+            },
+          }],
+        },
+      });
+      expect(converged.actions.map((action) => action.kind)).toEqual(["no-op"]);
+    },
+  );
+
   it("treats an exact relative symlink as converged", () => {
     const subject = resource("directory", "directory", "mirror-owned");
     const desired = {
@@ -1221,6 +1270,42 @@ describe("dependency ordering", () => {
 });
 
 describe("three-way skill drift", () => {
+  it.each([
+    { name: "Source path move", desiredPath: "new/SKILL.md", declaredParent: false, observedMode: 0o700, observedDigest: digestA, action: "mirror-directory" },
+    { name: "Source declares an implicit parent", desiredPath: "old/SKILL.md", declaredParent: false, observedMode: 0o700, observedDigest: digestA, action: "mirror-directory" },
+    { name: "local file edit", desiredPath: "new/SKILL.md", declaredParent: false, observedMode: 0o700, observedDigest: digestB, action: "drift-conflict" },
+    { name: "local declared-directory mode edit", desiredPath: "new/SKILL.md", declaredParent: true, observedMode: 0o755, observedDigest: digestA, action: "drift-conflict" },
+  ])("handles $name against the correct tree", (entry) => {
+    const subject = resource("skill", "skill", "replace-if-unmodified");
+    const parent = { path: "old", digest: sha256Hex("canonfig:directory"), objectKind: "directory" as const, mode: 0o700, executable: true };
+    const appliedFile = { path: "old/SKILL.md", digest: digestA, objectKind: "regular" as const, mode: 0o600, executable: false };
+    const ownedFiles = [...(entry.declaredParent ? [parent] : []), appliedFile];
+    const plan = runPlan(plannerInput([subject], {
+      desired: [{
+        kind: "skill",
+        digest: digestB,
+        mode: 0o700,
+        directories: entry.desiredPath === "old/SKILL.md" ? [{ path: "old", mode: 0o750 }] : [],
+        files: [{ ...appliedFile, path: entry.desiredPath }],
+      }],
+      observed: [{
+        state: "directory",
+        objectKind: "directory",
+        mode: 0o700,
+        files: [{ ...parent, mode: entry.observedMode }, { ...appliedFile, digest: entry.observedDigest }],
+      }],
+      applied: [{
+        resource: subject.id,
+        revision: "previous",
+        digest: directoryEntriesDigest(ownedFiles),
+        ownedFiles,
+        mode: 0o700,
+        appliedAt: "2026-08-14T00:00:00Z",
+      }],
+    }));
+    expect(plan.actions.map((action) => action.kind)).toEqual([entry.action]);
+  });
+
   const cases = [
     {
       name: "unchanged",
@@ -1265,7 +1350,7 @@ describe("three-way skill drift", () => {
   ] as const;
 
   for (const entry of cases) {
-    it(`distinguishes ${entry.name} skill state`, () => {
+    it.each(["SKILL.md", "references/SKILL.md"])(`distinguishes ${entry.name} skill state at %s`, (path) => {
       expect(detectSkillDrift({
         desiredDigest: entry.desired,
         observedDigest: entry.observed,
@@ -1273,7 +1358,7 @@ describe("three-way skill drift", () => {
       })).toBe(entry.expected);
       const subject = resource("skill", "skill", "replace-if-unmodified");
       const treeDigest = (digest: typeof digestA) => directoryEntriesDigest([{
-        path: "SKILL.md",
+        path,
         digest,
         executable: false,
         mode: 0o600,
@@ -1288,7 +1373,7 @@ describe("three-way skill drift", () => {
             mode: 0o700,
             directories: [],
             files: [{
-              path: "SKILL.md",
+              path,
               digest: entry.desired,
               executable: false,
               mode: 0o600,
@@ -1298,8 +1383,14 @@ describe("three-way skill drift", () => {
             state: "directory",
             mode: 0o700,
             objectKind: "directory",
-            files: [{
-              path: "SKILL.md",
+            files: [...(path.includes("/") ? [{
+              path: "references",
+              digest: sha256Hex("canonfig:directory"),
+              objectKind: "directory" as const,
+              mode: 0o700,
+              executable: true,
+            }] : []), {
+              path,
               digest: entry.observed,
               executable: false,
               mode: 0o600,
@@ -1310,6 +1401,7 @@ describe("three-way skill drift", () => {
             resource: subject.id,
             revision: "previous",
             digest: treeDigest(entry.applied),
+            ownedFiles: [{ path, digest: entry.applied, executable: false, mode: 0o600, objectKind: "regular" }],
             appliedAt: "2026-08-14T00:00:00Z",
           }],
         },

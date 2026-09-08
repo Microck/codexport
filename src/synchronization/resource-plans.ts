@@ -139,6 +139,21 @@ const fileSignature = (
   },
 ): string => `${file.digest}\0${file.symlinkTo === undefined && file.objectKind !== "symlink" ? file.mode?.toString(8) ?? (file.executable === true ? "x" : "-") : "-"}\0${file.objectKind ?? (file.symlinkTo === undefined ? "regular" : "symlink")}\0${file.symlinkTo ?? ""}`;
 
+// Compare against the tree that owns the digest, not another revision's paths.
+// Only required implicit directories are unowned; explicit entries stay visible.
+const observedDirectoryDigest = (
+  observed: Extract<ResourcePlanningContext["observed"], { readonly state: "directory" }>,
+  declaredEntries: ReadonlyArray<{ readonly path: string }>,
+): ContentDigest => {
+  const declaredPaths = new Set(declaredEntries.map((entry) => entry.path));
+  const ancestors = relativePathAncestors([...declaredPaths]);
+  return directoryEntriesDigest(presentObservedFiles(observed.files).filter((file) =>
+    declaredPaths.has(file.path)
+    || file.objectKind !== "directory"
+    || !ancestors.has(file.path)
+  ));
+};
+
 export const desiredResourceDigest = (desired: DesiredResource): ContentDigest | undefined => {
   switch (desired.kind) {
     case "file":
@@ -233,12 +248,14 @@ const observedMatchesDesired = (
         && observed.digest === desired.digest
         && (observedObjectKind === undefined || observedObjectKind === "regular");
     case "directory":
-    case "skill":
+    case "skill": {
+      const desiredEntries = desiredDirectoryEntries(desired);
       return observed.state === "directory"
         && (observed.objectKind === undefined || observed.objectKind === "directory")
         && observed.mode === desired.mode
         && observed.files.every((file) => !("state" in file))
-        && directoryEntriesDigest(presentObservedFiles(observed.files)) === desiredResourceDigest(desired);
+        && observedDirectoryDigest(observed, desiredEntries) === directoryEntriesDigest(desiredEntries);
+    }
     case "tool":
     case "credential":
       return observed.state === "present";
@@ -332,6 +349,7 @@ const replaceDirectory = (
   );
   const desiredEntries = desiredDirectoryEntries(desired);
   const desiredPaths = new Set(desiredEntries.map((file) => file.path));
+  const desiredAncestorPaths = relativePathAncestors([...desiredPaths]);
   return {
     kind: "mirror-directory",
     detail: {
@@ -345,7 +363,10 @@ const replaceDirectory = (
         .map((file) => file.path)
         .sort(compareText),
       removes: observedFiles
-        .filter((file) => !desiredPaths.has(file.path))
+        .filter((file) =>
+          !desiredPaths.has(file.path)
+          && !(file.objectKind === "directory" && desiredAncestorPaths.has(file.path))
+        )
         .map((file) => file.path)
         .sort(compareText),
     },
@@ -705,7 +726,15 @@ const planReplaceIfUnmodified = (
       },
     }];
   }
-  const currentDigest = observedDigest(context);
+  // A skill already at the desired tree needs no write, regardless of which
+  // directories the previous revision declared. Otherwise compare to that
+  // previous tree so Source path changes do not look like follower edits.
+  if (context.desired.kind === "skill"
+    && context.observed.state === "directory"
+    && observedMatchesDesired(context.desired, context.observed)) return [noOp()];
+  const currentDigest = context.desired.kind === "skill" && context.observed.state === "directory"
+    ? observedDirectoryDigest(context.observed, context.applied?.ownedFiles ?? desiredDirectoryEntries(context.desired))
+    : observedDigest(context);
   if (
     context.desired.kind === "file"
     && context.applied !== undefined
